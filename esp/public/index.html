@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP Enterprise Console</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --primary: #3b82f6;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+            --success: #10b981;
+            --danger: #ef4444;
+        }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .status-badge {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--success);
+            padding: 4px 12px;
+            border-radius: 99px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+        .card h2 {
+            margin-top: 0;
+            font-size: 18px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+        }
+        .metric {
+            font-size: 36px;
+            font-weight: bold;
+            color: var(--primary);
+            margin: 10px 0;
+        }
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            width: 100%;
+            transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.9; }
+        input, textarea {
+            width: 100%;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            box-sizing: border-box;
+        }
+        .terminal {
+            background: #000;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 12px;
+            color: var(--success);
+            height: 150px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+        }
+        .log-error { color: var(--danger); }
+        .log-info { color: var(--text-muted); }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>🚀 ESP Enterprise Console</h1>
+        <div class="status-badge" id="serverStatus">Checking Status...</div>
+    </div>
+
+    <div class="grid">
+        <!-- Dashboard Metrics -->
+        <div class="card">
+            <h2>Postmaster Telemetry</h2>
+            <div style="display: flex; justify-content: space-between;">
+                <div>
+                    <div style="font-size: 14px; color: var(--text-muted);">Emails Sent</div>
+                    <div class="metric" id="metricSent">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 14px; color: var(--text-muted);">Hard Bounces</div>
+                    <div class="metric" id="metricBounced" style="color: var(--danger);">0</div>
+                </div>
+            </div>
+            <button onclick="refreshStats()" style="margin-top: 15px; background: var(--border);">🔄 Refresh Metrics</button>
+        </div>
+
+        <!-- Mail Sender -->
+        <div class="card">
+            <h2>Test Outbound Engine</h2>
+            <input type="text" id="apiKey" placeholder="Authorization (API Key)" value="test-key">
+            <input type="email" id="rcpt" placeholder="Recipient (e.g. user@example.com)" value="test@local.com">
+            <textarea id="payload" rows="3" placeholder="JSON Payload Data">{"name": "Admin"}</textarea>
+            <button onclick="dispatchEmail()">📨 Dispatch via /v1/send</button>
+        </div>
+
+        <!-- Console -->
+        <div class="card" style="grid-column: 1 / -1;">
+            <h2>Live API Console</h2>
+            <div class="terminal" id="console">
+                <div class="log-info">> Dashboard Initialized. Waiting for events...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function log(msg, type='info') {
+            const c = document.getElementById('console');
+            const colorClass = type === 'error' ? 'log-error' : (type === 'success' ? '' : 'log-info');
+            c.innerHTML += `<div class="${colorClass}">> [${new Date().toLocaleTimeString()}] ${msg}</div>`;
+            c.scrollTop = c.scrollHeight;
+        }
+
+        // Check Health
+        fetch('/health').then(r => r.text()).then(t => {
+            document.getElementById('serverStatus').innerText = '🟢 Server Online';
+            log('Health Check Passed.', 'success');
+        }).catch(e => {
+            document.getElementById('serverStatus').innerText = '🔴 Server Offline';
+            document.getElementById('serverStatus').style.color = 'var(--danger)';
+            log('Health Check Failed. Is the server running?', 'error');
+        });
+
+        function refreshStats() {
+            log('Fetching Postmaster Stats...');
+            fetch('/api/postmaster/stats?domain=mta.our-esp.com')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('metricSent').innerText = data.sent || 0;
+                    document.getElementById('metricBounced').innerText = data.bounced || 0;
+                    log('Stats updated successfully.', 'success');
+                })
+                .catch(e => {
+                    log('Failed to fetch stats. (DB might be offline)', 'error');
+                });
+        }
+
+        function dispatchEmail() {
+            const key = document.getElementById('apiKey').value;
+            const payload = document.getElementById('payload').value;
+            
+            log(`Dispatching email via /v1/send...`);
+            
+            fetch('/v1/send', {
+                method: 'POST',
+                headers: {
+                    'Authorization': key,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    template_id: "demo-template",
+                    template_data: JSON.parse(payload)
+                })
+            })
+            .then(async r => {
+                const text = await r.text();
+                if (r.ok) {
+                    log(`Success: ${text}`, 'success');
+                } else {
+                    log(`Error ${r.status}: ${text}`, 'error');
+                }
+            })
+            .catch(e => {
+                log(`Network Error: ${e.message}`, 'error');
+            });
+        }
+    </script>
+</body>
+</html>

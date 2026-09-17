@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: esp_user
+      POSTGRES_PASSWORD: esp_password
+      POSTGRES_DB: esp_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+
+  mta:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025" # SMTP port
+      - "8025:8025" # Web UI port
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
