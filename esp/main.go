@@ -328,7 +328,11 @@ func main() {
 	// Expose Prometheus Metrics
 	mux.Handle("/metrics", promhttp.Handler())
 
-	// Phase 25: SMTP receiver migrated to C++ (Port 2525)
+	// Phase 25 originally planned to move SMTP receiving to a C++ engine on
+	// :2525; that engine never got past a commented-out socket-call stub
+	// (see git history, smtp-engine/ -- removed Phase 53). The real
+	// receiver lives in this binary; see startInboundSMTPServer in
+	// inbound_smtp.go, started below alongside the other workers.
 
 	// Start Webhook Dispatcher
 	globalWorkerWg.Add(1)
