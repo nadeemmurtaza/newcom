@@ -172,36 +172,14 @@ func main() {
 	// Serve the frontend dashboard
 	mux.Handle("/", http.FileServer(http.Dir("./public")))
 
-	// Simulated Login Endpoint (Activity Rules intercept)
-	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
-		orgID := r.URL.Query().Get("org_id")
-		accountID := r.URL.Query().Get("account_id")
-		ipAddress := r.RemoteAddr // in a real app, parse X-Forwarded-For
-
-		// Phase 41: White-Label Portal Security Check
-		if config, ok := r.Context().Value(BrandingContextKey).(*BrandingConfig); ok {
-			if config.OrgID != orgID {
-				http.Error(w, "403 Forbidden: You cannot log into this organization from this portal URL.", http.StatusForbidden)
-				return
-			}
-		}
-
-		// Phase 37: SSO Enforcement Intercept
-		if globalOrgManager.IsSSOEnforced(orgID) {
-			http.Error(w, "SSO Enforced: Please login via your corporate Identity Provider (SAML/OIDC).", http.StatusForbidden)
-			return
-		}
-
-		// Evaluate Identity Risk Context
-		riskEngine.EvaluateLoginAnomaly(accountID, ipAddress, r.UserAgent())
-
-		// Evaluate Rules Engine (Strict perimeter lock)
-		if !globalRulesEngine.EvaluateLogin(orgID, accountID, ipAddress) {
-			http.Error(w, "Account Suspended by Organizational Policy", http.StatusForbidden)
-			return
-		}
-		w.Write([]byte("Login Success. JWT Token Minted."))
-	})
+	// Phase 61: removed the old "/api/login" endpoint entirely -- it never
+	// checked a password or any credential at all (just org_id/account_id
+	// query params), and on success wrote the literal string "Login
+	// Success. JWT Token Minted." without ever minting anything. Real
+	// login is POST /api/users/login (handleUserLogin, user_auth.go),
+	// which actually verifies a password and issues a Redis-backed
+	// session. This one was reachable, unauthenticated, and granted
+	// nothing real while looking like it did.
 
 	// Phase 37: Secure Support Impersonation
 	mux.HandleFunc("POST /api/support/impersonate", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -218,10 +196,23 @@ func main() {
 		w.Write([]byte(fmt.Sprintf(`{"status": "SUCCESS", "impersonation_token": "%s", "expires_in": 3600}`, token)))
 	}))
 
-	// Simulated Context-Aware Access Endpoint
-	mux.HandleFunc("/api/drive/secure-download", func(w http.ResponseWriter, r *http.Request) {
+	// Phase 61: had no auth at all -- org_id came straight from a query
+	// parameter, so any caller could pick any org and the CAA check would
+	// evaluate that org's policy on their behalf. Now requires a verified
+	// session (userAuthMiddleware) and checks that user actually belongs
+	// to the org, the same pattern handleSearch uses.
+	mux.HandleFunc("/api/drive/secure-download", userAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		orgID := r.URL.Query().Get("org_id")
-		
+		userID := r.Header.Get("X-User-ID") // set by userAuthMiddleware from a verified session
+		if orgID == "" {
+			http.Error(w, "org_id is required", http.StatusBadRequest)
+			return
+		}
+		if !hasPermission(userID, orgID, "drive:read") {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
 		// Phase 32: Parse Device Posture from Headers
 		ctx := RequestContext{
 			IP:                r.RemoteAddr,
@@ -235,7 +226,7 @@ func main() {
 			return
 		}
 		w.Write([]byte("Secure File Payload"))
-	})
+	}))
 	mux.HandleFunc("POST /v1/send", authMiddleware(handleSendEmail))
 	// Phase 35: Campaign Maker-Checker Endpoints
 	mux.HandleFunc("POST /v1/campaigns/send", authMiddleware(handleSendCampaign))
@@ -259,7 +250,11 @@ func main() {
 	mux.HandleFunc("POST /v1/webhooks/bounce", handleBounceWebhook)
 
 	// Phase 43: Postmaster Telemetry & FBL
-	mux.HandleFunc("GET /api/postmaster/stats", handlePostmasterStats)
+	// Phase 61: had no auth at all -- any caller could read any domain's
+	// reputation/deliverability stats by guessing its name. Gated the same
+	// way domain creation is (authMiddleware, org API key); the handler
+	// itself verifies the domain belongs to that org.
+	mux.HandleFunc("GET /api/postmaster/stats", authMiddleware(handlePostmasterStats))
 	mux.HandleFunc("POST /v1/webhooks/fbl", handleFeedbackLoopWebhook)
 
 	// Phase 44: Journey Builder Trigger
@@ -323,11 +318,11 @@ func main() {
 	// fix above, since every result was silently empty, but still a real
 	// IDOR once that's fixed).
 	mux.HandleFunc("GET /api/search", userAuthMiddleware(handleSearch))
-	mux.HandleFunc("POST /api/drive/upload", handleDriveUpload)
-	mux.HandleFunc("POST /api/calendar/events", handleCalendarCreate)
+	mux.HandleFunc("POST /api/drive/upload", userAuthMiddleware(handleDriveUpload))
+	mux.HandleFunc("POST /api/calendar/events", userAuthMiddleware(handleCalendarCreate))
 
 	// Phase 18: Security (ZAP)
-	mux.HandleFunc("POST /api/security/zap", handleZeroHourAutoPurge)
+	mux.HandleFunc("POST /api/security/zap", userAuthMiddleware(handleZeroHourAutoPurge))
 
 	// Phase 10: Advanced Auth (DKIM & DNS)
 	mux.HandleFunc("POST /api/domains/", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -716,8 +711,15 @@ func handleInboundEmail(w http.ResponseWriter, r *http.Request) {
 // Phase 43: Postmaster Handlers
 func handlePostmasterStats(w http.ResponseWriter, r *http.Request) {
 	domain := r.URL.Query().Get("domain")
+	orgID := r.Header.Get("X-Org-ID") // set by authMiddleware from the caller's API key
 	if domain == "" {
 		http.Error(w, "Missing domain", http.StatusBadRequest)
+		return
+	}
+
+	var owns bool
+	if err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM domains WHERE domain_name = $1 AND org_id = $2)", domain, orgID).Scan(&owns); err != nil || !owns {
+		http.Error(w, "Forbidden: domain does not belong to your organization", http.StatusForbidden)
 		return
 	}
 

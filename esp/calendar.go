@@ -18,6 +18,11 @@ type CalendarEvent struct {
 	MeetingLink string   `json:"meeting_link"`
 }
 
+// Phase 61: org_id and organizer_id used to come straight from the request
+// body -- any caller could create events in any org under any organizer's
+// name, with no check at all. Now requires a verified session
+// (userAuthMiddleware); organizer_id is always the authenticated user, and
+// the caller must actually belong to the org they're creating it in.
 func handleCalendarCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -27,6 +32,16 @@ func handleCalendarCreate(w http.ResponseWriter, r *http.Request) {
 	var ev CalendarEvent
 	if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	ev.OrganizerID = r.Header.Get("X-User-ID") // set by userAuthMiddleware from a verified session
+	if ev.OrgID == "" || ev.OrganizerID == "" {
+		http.Error(w, "org_id is required", http.StatusBadRequest)
+		return
+	}
+	if !hasPermission(ev.OrganizerID, ev.OrgID, "calendar:write") {
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 

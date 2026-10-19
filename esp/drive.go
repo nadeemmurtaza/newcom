@@ -9,6 +9,12 @@ import (
 )
 
 // Phase 24: Cloud Storage (Google Drive clone)
+//
+// Phase 61: org_id and owner_id used to come straight from form fields --
+// any caller could upload a file into any org, attributed to any user,
+// with no check at all. Now requires a verified session (userAuthMiddleware)
+// and the caller must actually belong to the org they're uploading into;
+// owner_id is the authenticated user, never a value the client supplies.
 func handleDriveUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -29,7 +35,15 @@ func handleDriveUpload(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	orgID := r.FormValue("org_id")
-	ownerID := r.FormValue("owner_id")
+	ownerID := r.Header.Get("X-User-ID") // set by userAuthMiddleware from a verified session
+	if orgID == "" || ownerID == "" {
+		http.Error(w, "org_id is required", http.StatusBadRequest)
+		return
+	}
+	if !hasPermission(ownerID, orgID, "drive:write") {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 
 	// Store locally as a simulation of S3
 	os.MkdirAll("./cloud_storage", 0755)
