@@ -34,6 +34,7 @@ var globalPostmaster *PostmasterManager
 var globalJourneyEngine *JourneyEngine
 var globalBillingEngine *BillingEngine
 var globalMLScanner *MLAbuseScanner
+var globalMTAShaper *MTATrafficShaper
 
 // Phase 23: Global Worker Sync state
 var globalWorkerCtx context.Context
@@ -113,6 +114,9 @@ func main() {
 
 	// Phase 29: Initialize Outbound MTA Traffic Router
 	outboundRouter := NewOutboundRouter()
+
+	// Phase 53: Real outbound MTA (DNS MX lookup + SMTP handshake)
+	globalMTAShaper = NewMTATrafficShaper(db, rdb, nil)
 
 	// Phase 30: Initialize Identity Risk Engine (Kill Switch)
 	riskEngine := NewIdentityRiskEngine(db, rdb)

@@ -4,10 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -75,37 +75,54 @@ type OutboundRouter struct {
 	IPs []*IPNode
 }
 
+// NewOutboundRouter builds the outbound IP pool from OUTBOUND_IP_POOL (a
+// comma-separated list of IPs this host actually owns and can bind to,
+// ideally with their own PTR/rDNS set up for deliverability).
+//
+// Phase 53: this used to default to a handful of hardcoded addresses in
+// Google's own public ranges -- IPs this deployment doesn't own and can't
+// bind a local socket to, so PerformHandshake would fail "invalid source
+// IP" on every real send. With nothing configured, the pool is a single
+// entry with an empty IPAddress, which tells PerformHandshake to let the OS
+// pick the default route instead of binding a specific (and fake) source.
 func NewOutboundRouter() *OutboundRouter {
-	return &OutboundRouter{
-		IPs: []*IPNode{
-			{IPAddress: "209.85.220.41", Tier: TierPremium, TargetCounts: make(map[string]int), PausedUntil: make(map[string]time.Time), Breaker: NewCircuitBreaker(3, 30*time.Second)},
-			{IPAddress: "209.85.220.42", Tier: TierPremium, TargetCounts: make(map[string]int), PausedUntil: make(map[string]time.Time), Breaker: NewCircuitBreaker(3, 30*time.Second)},
-			{IPAddress: "104.132.143.10", Tier: TierWarmup, TargetCounts: make(map[string]int), PausedUntil: make(map[string]time.Time), Breaker: NewCircuitBreaker(3, 30*time.Second)},
-			{IPAddress: "104.132.143.11", Tier: TierWarmup, TargetCounts: make(map[string]int), PausedUntil: make(map[string]time.Time), Breaker: NewCircuitBreaker(3, 30*time.Second)},
-			{IPAddress: "172.217.19.1", Tier: TierQuarantine, TargetCounts: make(map[string]int), PausedUntil: make(map[string]time.Time), Breaker: NewCircuitBreaker(3, 30*time.Second)},
-		},
-	}
-}
-
-func (router *OutboundRouter) getIPForDelivery(destination string, isPremiumOrg bool) *IPNode {
-	// Simple simulated routing logic
-	for _, ip := range router.IPs {
-		// Bad Neighbor Guard
-		if isPremiumOrg && ip.Tier != TierPremium { continue }
-		if !isPremiumOrg && ip.Tier == TierPremium { continue }
-
-		if ip.CanSendTo(destination, isPremiumOrg) {
-			return ip
+	var ips []string
+	if pool := strings.TrimSpace(os.Getenv("OUTBOUND_IP_POOL")); pool != "" {
+		for _, ip := range strings.Split(pool, ",") {
+			if ip = strings.TrimSpace(ip); ip != "" {
+				ips = append(ips, ip)
+			}
 		}
 	}
+	if len(ips) == 0 {
+		ips = []string{""}
+	}
 
-	// Spillover Management: If all warmup IPs hit their destination caps, gracefully route to a premium Anchor IP
-	if !isPremiumOrg {
-		for _, ip := range router.IPs {
-			if ip.Tier == TierPremium && ip.CanSendTo(destination, true) {
-				log.Printf("[Traffic Sharder] Spillover engaged for destination %s", destination)
-				return ip
-			}
+	router := &OutboundRouter{}
+	for _, ip := range ips {
+		router.IPs = append(router.IPs, &IPNode{
+			IPAddress:    ip,
+			Tier:         TierWarmup,
+			TargetCounts: make(map[string]int),
+			PausedUntil:  make(map[string]time.Time),
+			Breaker:      NewCircuitBreaker(3, 30*time.Second),
+		})
+	}
+	return router
+}
+
+// getIPForDelivery picks the first pool IP with capacity for destination.
+//
+// Phase 53: this used to gate on IPNode.Tier (TierPremium vs TierWarmup) to
+// decide which IPs an org could use, but the pool is now whatever the
+// operator actually configured via OUTBOUND_IP_POOL -- there's no basis for
+// treating any of them as more "premium" than another. An org with its own
+// dedicated IP is already routed to it earlier via GetDedicatedIPForDispatch;
+// everyone else shares the configured pool.
+func (router *OutboundRouter) getIPForDelivery(destination string, isPremiumOrg bool) *IPNode {
+	for _, ip := range router.IPs {
+		if ip.CanSendTo(destination, isPremiumOrg) {
+			return ip
 		}
 	}
 	return nil
@@ -240,65 +257,70 @@ func startOutboundMTAWorker(ctx context.Context, wg *sync.WaitGroup, db *sql.DB,
 				continue
 			}
 
+			// Phase 53: Real delivery. Build and DKIM-sign the message, then
+			// actually dial the recipient's MX and speak SMTP -- this used
+			// to be entirely rand.Float32()-simulated and never touched the
+			// network at all (PerformHandshake/MTATrafficShaper existed but
+			// nothing ever called them).
+			from, _ := req["From"].(string)
+			subjectStr, _ := req["Subject"].(string)
+			msgIDStr, _ := req["MessageID"].(string)
+			raw := buildRawMessage(from, rcpt, subjectStr, body, msgIDStr)
+			raw = signOutboundMessage(db, raw, from)
+
 			// Phase 33: Reliability Hardening (Circuit Breaker)
-			var randVal float32
+			var statusCode int
 			err = ipNode.Breaker.Execute(func() error {
-				// Simulate external provider response (Network connection attempt)
-				randVal = rand.Float32()
-				
-				// Simulate a total network outage (5% of the time, Microsoft goes completely offline)
-				if randVal < 0.05 {
-					return errors.New("external SMTP timeout")
-				}
-				
-				if randVal < 0.10 {
-					// 5% chance of SMTP 421 Rate Limit (Dynamic Back-off)
-					ipNode.ApplyBackoff(destination)
-					return nil // Not a hard network failure, just rate limiting
-				} else if randVal < 0.15 {
-					// 5% chance of SMTP 550 Hard Bounce (Spamhaus block)
-					ipNode.mu.Lock()
-					ipNode.Bounces += 5
-					ipNode.mu.Unlock()
-					
-					// Add to suppression list automatically
-					db.Exec("INSERT INTO suppression_list (org_id, email, reason) VALUES ($1, $2, 'HARD_BOUNCE') ON CONFLICT DO NOTHING", orgID, rcpt)
-					
-					// Phase 43: Postmaster Metric (Hard Bounce)
-					if from, ok := req["From"].(string); ok {
-						globalPostmaster.RecordMetric(ctx, from, "bounced", 1)
-					}
-				} else {
+				statusCode, err = globalMTAShaper.PerformHandshake(&SMTPSession{
+					IPAddress:    ipNode.IPAddress,
+					TargetDomain: destination,
+					Recipient:    rcpt,
+					Payload:      raw,
+				})
+
+				switch {
+				case statusCode >= 200 && statusCode < 300:
 					// Success
 					ipNode.RecordSend(destination)
-					
-					// Phase 43: Postmaster Metric (Sent)
-					if from, ok := req["From"].(string); ok {
-						globalPostmaster.RecordMetric(ctx, from, "sent", 1)
-					}
-					
-					// Phase 49: Outbound Event Firehose (Delivered)
+					globalPostmaster.RecordMetric(ctx, from, "sent", 1)
 					if orgID != "" {
-						msgID, _ := req["MessageID"].(string)
 						QueueWebhookEvent(rdb, WebhookEvent{
 							OrgID:     orgID,
-							MessageID: msgID,
+							MessageID: msgIDStr,
 							EventType: "delivered",
 							Metadata:  `{"email": "` + rcpt + `", "ip": "` + ipNode.IPAddress + `"}`,
 						})
 					}
+					return nil
+
+				case statusCode == 421 || statusCode == 450 || statusCode == 451 || statusCode == 452:
+					// Soft bounce / rate limited -- not a circuit-breaker trip
+					ipNode.ApplyBackoff(destination)
+					return nil
+
+				case statusCode >= 500 && statusCode < 600:
+					// Hard bounce
+					ipNode.mu.Lock()
+					ipNode.Bounces += 5
+					ipNode.mu.Unlock()
+					db.Exec("INSERT INTO suppression_list (org_id, email, reason) VALUES ($1, $2, 'HARD_BOUNCE') ON CONFLICT DO NOTHING", orgID, rcpt)
+					globalPostmaster.RecordMetric(ctx, from, "bounced", 1)
+					return nil
+
+				default:
+					// Connection-level failure (0 or unparseable) -- trip the breaker
+					return fmt.Errorf("delivery failed with status %d: %v", statusCode, err)
 				}
-				return nil
 			})
 
 			if err != nil {
 				log.Printf("Delivery aborted by Circuit Breaker for %s: %v", ipNode.IPAddress, err)
 				requeueExponential(ctx, rdb, req)
-			} else if randVal >= 0.05 && randVal < 0.10 {
-				log.Printf("[SMTP 421] Soft bounce from %s. Applying exponential backoff.", destination)
+			} else if statusCode == 421 || statusCode == 450 || statusCode == 451 || statusCode == 452 {
+				log.Printf("[SMTP %d] Soft bounce from %s. Applying exponential backoff.", statusCode, destination)
 				requeueExponential(ctx, rdb, req)
 			} else {
-				log.Printf("Outbound Router: Processed email to %s via %s IP %s", destination, ipNode.Tier, ipNode.IPAddress)
+				log.Printf("Outbound Router: Processed email to %s via %s IP %s (status %d)", destination, ipNode.Tier, ipNode.IPAddress, statusCode)
 			}
 		}
 	}

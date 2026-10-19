@@ -144,15 +144,19 @@ func (mta *MTATrafficShaper) QuarantineWorkspace(ctx context.Context, orgID stri
 
 // PerformHandshake establishes TCP and executes the SMTP sequence, returning explicit SMTP status codes
 func (mta *MTATrafficShaper) PerformHandshake(session *SMTPSession) (int, error) {
-	// Setup TCP dialer bound to the specific Source IP
-	localAddr, err := net.ResolveTCPAddr("tcp", session.IPAddress+":0")
-	if err != nil {
-		return 0, fmt.Errorf("invalid source IP %s: %v", session.IPAddress, err)
-	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
 
-	dialer := &net.Dialer{
-		LocalAddr: localAddr,
-		Timeout:   10 * time.Second,
+	// Only bind a specific source IP when one was actually configured for
+	// this org (a real IP the operator owns, reachable and with its own
+	// PTR/rDNS set up). Binding to an arbitrary address this host doesn't
+	// own just fails the dial; letting the OS pick the default route is
+	// the correct behavior when no dedicated IP applies.
+	if session.IPAddress != "" {
+		localAddr, err := net.ResolveTCPAddr("tcp", session.IPAddress+":0")
+		if err != nil {
+			return 0, fmt.Errorf("invalid source IP %s: %v", session.IPAddress, err)
+		}
+		dialer.LocalAddr = localAddr
 	}
 
 	// Lookup MX records for target domain
@@ -174,7 +178,11 @@ func (mta *MTATrafficShaper) PerformHandshake(session *SMTPSession) (int, error)
 	}
 	defer client.Close()
 
-	if err = client.Hello("mta.our-esp.com"); err != nil {
+	// mailHostname() is the same configurable hostname the inbound receiver
+	// advertises (MAIL_HOSTNAME env var) -- "our-esp.com" was a fake
+	// placeholder domain nobody deploying this actually owns, which would
+	// fail HELO/rDNS alignment checks against any real receiver.
+	if err = client.Hello(mailHostname()); err != nil {
 		return extractSMTPCode(err), err
 	}
 
@@ -188,7 +196,7 @@ func (mta *MTATrafficShaper) PerformHandshake(session *SMTPSession) (int, error)
 	}
 
 	// Sender & Rcpt
-	if err = client.Mail("bounce@our-esp.com"); err != nil {
+	if err = client.Mail("bounce@" + mailHostname()); err != nil {
 		return extractSMTPCode(err), err
 	}
 	if err = client.Rcpt(session.Recipient); err != nil {
