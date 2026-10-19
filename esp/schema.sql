@@ -302,8 +302,11 @@ CREATE TABLE ip_addresses (
 ALTER TABLE sub_accounts ADD COLUMN ip_pool_id UUID REFERENCES ip_pools(id) ON DELETE SET NULL;
 
 -- Phase 10: Advanced Security (DKIM & SPF)
-ALTER TABLE domains ADD COLUMN dkim_private_key TEXT;
-ALTER TABLE domains ADD COLUMN dkim_public_key TEXT;
+-- dkim_private_key/dkim_public_key are already columns on the domains
+-- CREATE TABLE above (Phase 38) -- re-adding them here used to abort this
+-- whole script with "column already exists", silently skipping every
+-- statement after it (sweep_rules, journey_contacts, ab_tests,
+-- messages.snoozed_until all went missing because of this one duplicate).
 ALTER TABLE domains ADD COLUMN dkim_selector VARCHAR(50) DEFAULT 'esp';
 ALTER TABLE domains ADD COLUMN spf_verified BOOLEAN DEFAULT FALSE;
 ALTER TABLE domains ADD COLUMN dkim_verified BOOLEAN DEFAULT FALSE;
@@ -347,6 +350,18 @@ CREATE TABLE campaigns (
 -- Shared by both so "remaining" means something real instead of
 -- "everyone" -- UNIQUE(campaign_id, contact_id) is what makes a resend
 -- impossible to accidentally duplicate from either language.
+CREATE TABLE campaign_variants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
+    template_id UUID REFERENCES templates(id),
+    weight_percentage INT NOT NULL -- e.g., 50 for 50% of the list
+);
+
+-- campaign_variants must exist before this table -- campaign_contact_sends
+-- references it via variant_id, and a forward reference here previously
+-- aborted schema.sql mid-file (ERROR: relation "campaign_variants" does not
+-- exist), silently skipping every statement after it including sweep_rules,
+-- journey_contacts, ab_tests and messages.snoozed_until.
 CREATE TABLE campaign_contact_sends (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -354,13 +369,6 @@ CREATE TABLE campaign_contact_sends (
     variant_id UUID REFERENCES campaign_variants(id) ON DELETE SET NULL,
     sent_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (campaign_id, contact_id)
-);
-
-CREATE TABLE campaign_variants (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
-    template_id UUID REFERENCES templates(id),
-    weight_percentage INT NOT NULL -- e.g., 50 for 50% of the list
 );
 
 -- Phase 12: Advanced Mailbox UX
@@ -394,9 +402,11 @@ CREATE TABLE scheduled_emails (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-ALTER TABLE messages ADD COLUMN thread_id VARCHAR(255);
+-- thread_id is already a column on the messages CREATE TABLE above; this
+-- duplicate ADD COLUMN used to abort the script right here, which is why
+-- snoozed_until (added next) never actually existed at runtime.
+-- category is already a column on the messages CREATE TABLE above.
 ALTER TABLE messages ADD COLUMN snoozed_until TIMESTAMP WITH TIME ZONE;
-ALTER TABLE messages ADD COLUMN category VARCHAR(50) DEFAULT 'primary'; -- primary, social, promotions, updates, forums
 ALTER TABLE messages ADD COLUMN is_confidential BOOLEAN DEFAULT FALSE;
 ALTER TABLE messages ADD COLUMN confidential_expires_at TIMESTAMP WITH TIME ZONE;
 
@@ -459,15 +469,15 @@ CREATE TABLE rate_limits (
     daily_limit INT NOT NULL DEFAULT 10000
 );
 
+-- phishing_flag is already a column on the messages CREATE TABLE above.
 ALTER TABLE messages ADD COLUMN spam_score FLOAT;
-ALTER TABLE messages ADD COLUMN phishing_flag BOOLEAN DEFAULT FALSE;
 
 -- Phase 15: Integrations
 ALTER TABLE attachments ADD COLUMN cloud_storage_url VARCHAR(500);
 ALTER TABLE attachments ADD COLUMN is_inline BOOLEAN DEFAULT FALSE;
 
 -- Phase 16: Advanced Mailbox UX (Outlook Style)
-ALTER TABLE messages ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE;
+-- is_pinned is already a column on the messages CREATE TABLE above.
 ALTER TABLE mailboxes ADD COLUMN mailbox_type VARCHAR(50) DEFAULT 'user'; -- 'user', 'shared', 'group'
 
 CREATE TABLE ignored_threads (
@@ -487,7 +497,7 @@ CREATE TABLE sweep_rules (
 );
 
 -- Phase 17: Compliance & Admin (Exchange Style)
-ALTER TABLE mailboxes ADD COLUMN litigation_hold BOOLEAN DEFAULT FALSE;
+-- litigation_hold is already a column on the mailboxes CREATE TABLE above.
 
 CREATE TABLE information_barriers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

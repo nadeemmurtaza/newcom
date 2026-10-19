@@ -1,0 +1,114 @@
+version: '3.8'
+
+# Phase 59: root compose wiring all four real services together --
+# esp (Go, mail core + API), campaign-service (Java/Spring Batch),
+# collab-service (Node/WebSocket CRDT), one shared Postgres + Redis.
+# esp/docker-compose.yml still exists for standing up esp on its own;
+# this is the one that brings up the whole newcom stack at once.
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: esp_user
+      POSTGRES_PASSWORD: esp_password
+      POSTGRES_DB: esp_db
+    ports:
+      # Host-side only: 5432 is already bound by a legacy Windows Postgres
+      # install on this machine. Services inside the compose network still
+      # reach this container at db:5432 regardless of the host mapping.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Phase 59: esp/docker-compose.yml never actually loaded schema.sql
+      # into a fresh database -- a brand-new `db` container started
+      # completely empty, with nothing to create a single table. Postgres's
+      # official image runs every .sql file here once, only on first init.
+      - ./esp/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U esp_user -d esp_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      # Host-side only: 6379 is already bound by a legacy Windows Redis
+      # install on this machine. Services inside the compose network still
+      # reach this container at redis:6379 regardless of the host mapping.
+      - "6380:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  esp:
+    build: ./esp
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://esp_user:esp_password@db:5432/esp_db?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      # Generate with: openssl rand -base64 24 | cut -c1-32
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:-mail.nmail.local}
+      PERSONAL_EMAIL_DOMAIN: ${PERSONAL_EMAIL_DOMAIN:-nmail.local}
+      PORT: "8080"
+      SMTP_PORT: "2525"
+      # "Login with nID" (nid_auth.go) -- optional; leave unset to disable
+      NID_BASE_URL: ${NID_BASE_URL:-}
+      NID_CLIENT_ID: ${NID_CLIENT_ID:-}
+      NID_CLIENT_SECRET: ${NID_CLIENT_SECRET:-}
+      NID_REDIRECT_URI: ${NID_REDIRECT_URI:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+    ports:
+      - "8080:8080" # HTTP API / dashboard
+      - "2525:2525" # Inbound SMTP (front with a :25 relay or port-forward in prod)
+    restart: unless-stopped
+
+  campaign-service:
+    build: ./campaign-service
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: jdbc:postgresql://db:5432/esp_db
+      DATABASE_USER: esp_user
+      DATABASE_PASSWORD: esp_password
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CAMPAIGN_SERVICE_PORT: "8082"
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:-mail.nmail.local}
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
+
+  collab-service:
+    build: ./collab-service
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://esp_user:esp_password@db:5432/esp_db?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      COLLAB_PORT: "8090"
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

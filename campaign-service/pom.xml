@@ -42,12 +42,41 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-quartz</artifactId>
         </dependency>
+        <!-- Phase 60: real automated tests. spring-boot-starter-parent
+             manages JUnit5/Mockito versions for this; nothing declared a
+             test dependency before, so `mvn test` had nothing to run. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.batch</groupId>
+            <artifactId>spring-batch-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
     <build>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Phase 60: Mockito's bundled Byte Buddy doesn't yet
+                         officially support bytecode as new as what a JDK
+                         newer than this project's declared java.version
+                         (17) produces; confirmed on this host's JDK 23,
+                         mocking JdbcTemplate failed with
+                         "Java 23 (67) is not supported by the current
+                         version of Byte Buddy". This is the flag Byte
+                         Buddy's own error message names as the fix; the
+                         project's actual deployment target stays JDK 17. -->
+                    <argLine>-Dnet.bytebuddy.experimental=true</argLine>
+                </configuration>
             </plugin>
         </plugins>
     </build>

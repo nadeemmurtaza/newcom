@@ -42,30 +42,15 @@ const awarenessProtocol = require('y-protocols/awareness');
 //    with the rest of this file sending/receiving raw Yjs update bytes
 //    rather than the tagged sync-step protocol.
 
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL || 'postgres://esp_user:esp_password@localhost:5432/esp_db?sslmode=disable'
-});
-
-const redisPub = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
-const redisSub = redisPub.duplicate();
-
-Promise.all([redisPub.connect(), redisSub.connect()]).catch(console.error);
-
-const COLLAB_PORT = parseInt(process.env.COLLAB_PORT || '8090', 10);
-const wss = new WebSocket.Server({ port: COLLAB_PORT, clientTracking: true });
-
-// Memory maps for Yjs CRDT Documents
-const docs = new Map();
-
 /**
  * Resolves a nmail session token (the same "user_session:<token>" key
  * userAuthMiddleware in user_auth.go issues and checks) to a user ID.
  * Returns null if the token is missing, expired, or unknown -- never
  * throws, so callers can treat any null the same way as "unauthorized".
  */
-async function resolveUserSession(token) {
+async function resolveUserSession(redisClient, token) {
     try {
-        const userID = await redisPub.get(`user_session:${token}`);
+        const userID = await redisClient.get(`user_session:${token}`);
         return userID || null;
     } catch (err) {
         console.error('Session lookup failed:', err);
@@ -82,7 +67,7 @@ async function resolveUserSession(token) {
  * membership; this isn't trying to enforce per-permission granularity,
  * just "is this person allowed in this org's documents at all").
  */
-async function userCanAccessDocument(userID, docId) {
+async function userCanAccessDocument(pool, userID, docId) {
     try {
         const result = await pool.query(
             `SELECT 1 FROM documents d
@@ -100,7 +85,7 @@ async function userCanAccessDocument(userID, docId) {
 }
 
 /** Loads a document's previously saved CRDT state, if any. */
-async function loadPersistedState(docId) {
+async function loadPersistedState(pool, docId) {
     try {
         const result = await pool.query('SELECT crdt_state FROM documents WHERE id = $1', [docId]);
         if (result.rowCount > 0 && result.rows[0].crdt_state) {
@@ -114,7 +99,7 @@ async function loadPersistedState(docId) {
 
 // Helper to get or create a Yjs document, hydrating it from Postgres on
 // first load so a server restart doesn't silently discard prior content.
-async function getYDoc(docId) {
+async function getYDoc(docs, pool, redisSub, docId) {
     if (docs.has(docId)) {
         return docs.get(docId);
     }
@@ -123,7 +108,7 @@ async function getYDoc(docId) {
     ydoc.awareness = new awarenessProtocol.Awareness(ydoc);
     docs.set(docId, ydoc);
 
-    const persisted = await loadPersistedState(docId);
+    const persisted = await loadPersistedState(pool, docId);
     if (persisted) {
         Y.applyUpdate(ydoc, persisted);
     }
@@ -151,25 +136,41 @@ async function getYDoc(docId) {
     return ydoc;
 }
 
-// Phase 27: The Post-Ingestion Event Stream (FCM Push Notifications) --
-// one subscription for the whole process, not re-subscribed per document.
-redisSub.subscribe('email_success_stream', (message) => {
-    const event = JSON.parse(message);
-    console.log(`[Node.js FCM] PUSH NOTIFICATION: New Mail ${event.msg_id} arrived in Mailbox ${event.mailbox_id}!`);
-});
-
-// Phase 30: Compromised Account Defense (The Kill Switch) -- also a
-// single process-wide subscription.
-redisSub.subscribe('kill_switch_stream', (accountId) => {
-    console.log(`[Node.js Kill Switch] REVOKING SESSIONS FOR COMPROMISED ACCOUNT: ${accountId}`);
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN && client.user_id === accountId) {
-            client.close(1008, 'Account suspended for security reasons');
-        }
+function startServer() {
+    const pool = new Pool({
+        connectionString: process.env.DATABASE_URL || 'postgres://esp_user:esp_password@localhost:5432/esp_db?sslmode=disable'
     });
-});
 
-wss.on('connection', async (ws, req) => {
+    const redisPub = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+    const redisSub = redisPub.duplicate();
+
+    Promise.all([redisPub.connect(), redisSub.connect()]).catch(console.error);
+
+    const COLLAB_PORT = parseInt(process.env.COLLAB_PORT || '8090', 10);
+    const wss = new WebSocket.Server({ port: COLLAB_PORT, clientTracking: true });
+
+    // Memory maps for Yjs CRDT Documents
+    const docs = new Map();
+
+    // Phase 27: The Post-Ingestion Event Stream (FCM Push Notifications) --
+    // one subscription for the whole process, not re-subscribed per document.
+    redisSub.subscribe('email_success_stream', (message) => {
+        const event = JSON.parse(message);
+        console.log(`[Node.js FCM] PUSH NOTIFICATION: New Mail ${event.msg_id} arrived in Mailbox ${event.mailbox_id}!`);
+    });
+
+    // Phase 30: Compromised Account Defense (The Kill Switch) -- also a
+    // single process-wide subscription.
+    redisSub.subscribe('kill_switch_stream', (accountId) => {
+        console.log(`[Node.js Kill Switch] REVOKING SESSIONS FOR COMPROMISED ACCOUNT: ${accountId}`);
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN && client.user_id === accountId) {
+                client.close(1008, 'Account suspended for security reasons');
+            }
+        });
+    });
+
+    wss.on('connection', async (ws, req) => {
     // Phase 58: confirmed live -- auth (resolveUserSession,
     // userCanAccessDocument) and getYDoc are real async DB calls, but this
     // handler used to attach ws.on('message', ...) only after awaiting
@@ -190,20 +191,20 @@ wss.on('connection', async (ws, req) => {
             return;
         }
 
-        const userID = await resolveUserSession(token);
+        const userID = await resolveUserSession(redisPub, token);
         if (!userID) {
             ws.close(1008, 'Unauthorized: invalid or expired session');
             return;
         }
 
-        if (!(await userCanAccessDocument(userID, docId))) {
+        if (!(await userCanAccessDocument(pool, userID, docId))) {
             ws.close(1008, 'Forbidden: you do not have access to this document');
             return;
         }
 
         console.log(`[Node.js CRDT] Authenticated User ${userID} connecting to Document ${docId}`);
 
-        const ydoc = await getYDoc(docId);
+        const ydoc = await getYDoc(docs, pool, redisSub, docId);
 
         // Sync Initial State
         const syncState = Y.encodeStateAsUpdate(ydoc);
@@ -238,4 +239,11 @@ wss.on('connection', async (ws, req) => {
     }
 });
 
-console.log(`[Node.js Microservice] CRDT Collaboration Hub running on ws://localhost:${COLLAB_PORT}`);
+    console.log(`[Node.js Microservice] CRDT Collaboration Hub running on ws://localhost:${COLLAB_PORT}`);
+}
+
+if (require.main === module) {
+    startServer();
+}
+
+module.exports = { resolveUserSession, userCanAccessDocument, loadPersistedState, getYDoc, startServer };

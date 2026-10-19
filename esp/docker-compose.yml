@@ -11,6 +11,16 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Phase 59: this never actually loaded schema.sql -- a fresh `db`
+      # container started with an empty database and nothing creating a
+      # single table. Postgres's official image runs every .sql file here
+      # once, on first init only.
+      - ./schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U esp_user -d esp_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
 
   redis:
@@ -24,8 +34,10 @@ services:
   app:
     build: .
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     environment:
       DATABASE_URL: postgres://esp_user:esp_password@db:5432/esp_db?sslmode=disable
       REDIS_URL: redis://redis:6379/0

@@ -1,0 +1,6 @@
+dashboard/node_modules
+lsm_data
+colossus_blob_storage
+*.exe
+*.log
+.git
