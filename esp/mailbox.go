@@ -30,17 +30,37 @@ func handleGetMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if folderName == "" {
-		folderName = "Inbox"
+		folderName = "INBOX" // default system folder name is upper-case; see defaultSystemFolders
 	}
 
-	rows, err := db.Query(`
+	// messages is RLS-protected on app.current_org_id (see persistInboundMessage
+	// in inbound_smtp.go); resolve the mailbox's org and scope the read to a
+	// transaction with that setting, or every query here returns zero rows.
+	var orgID string
+	if err := db.QueryRow("SELECT org_id FROM mailboxes WHERE id = $1", mailboxID).Scan(&orgID); err != nil {
+		http.Error(w, "Mailbox not found", http.StatusNotFound)
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("SELECT set_config('app.current_org_id', $1, true)", orgID); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	rows, err := tx.Query(`
 		SELECT m.id, m.sender, m.subject, COALESCE(m.body_text, ''), COALESCE(m.body_html, ''), m.is_read, m.is_starred, m.created_at, COALESCE(m.thread_id, ''), COALESCE(m.category, ''), COALESCE(CAST(m.snoozed_until AS VARCHAR), '')
 		FROM messages m
 		JOIN folders f ON m.folder_id = f.id
 		WHERE m.mailbox_id = $1 AND f.name = $2 AND m.snoozed_until IS NULL
 		ORDER BY m.created_at DESC
 	`, mailboxID, folderName)
-	
+
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return

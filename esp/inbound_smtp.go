@@ -159,11 +159,30 @@ func persistInboundMessage(db *sql.DB, rdb *redis.Client, orgID, domainID, from,
 		snippet = snippet[:240]
 	}
 
-	_, err = db.Exec(`
+	// messages has a tenant_isolation_policy RLS policy keyed off the
+	// app.current_org_id session setting. Nothing in this codebase ever set
+	// it, so every insert into messages was silently impossible -- set it
+	// with set_config's is_local=true so it only applies within this
+	// transaction and never leaks across pooled connections.
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("SELECT set_config('app.current_org_id', $1, true)", orgID); err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(`
 		INSERT INTO messages (org_id, mailbox_id, folder_id, sender, recipients, subject, snippet, body_text, body_html, thread_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, orgID, mailboxID, folderID, from, recipientsJoined, subject, snippet, bodyText, bodyHTML, threadID)
 	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 
