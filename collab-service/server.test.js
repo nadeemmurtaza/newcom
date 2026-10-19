@@ -87,6 +87,10 @@ test('getYDoc hydrates a fresh Y.Doc from persisted state -- the write-only pers
     const ydoc = await getYDoc(docs, pool, redisSub, 'doc-restart-test');
 
     assert.equal(ydoc.getText('body').toString(), 'previously saved content');
+    // Awareness starts a setInterval for stale-client cleanup (real and
+    // correct for a long-running server) that otherwise keeps this test
+    // process alive until node:test's own hang detection kills the file.
+    ydoc.awareness.destroy();
 });
 
 test('getYDoc returns the same in-memory doc on a second call for the same docId', async () => {
@@ -98,4 +102,5 @@ test('getYDoc returns the same in-memory doc on a second call for the same docId
     const second = await getYDoc(docs, pool, redisSub, 'doc-cache-test');
 
     assert.equal(first, second);
+    first.awareness.destroy();
 });
