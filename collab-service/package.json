@@ -2,8 +2,9 @@
   "name": "collab-service",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -11,11 +12,10 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "jsonwebtoken": "^9.0.3",
     "pg": "^8.23.0",
     "redis": "^6.2.1",
     "ws": "^8.21.3",
-    "y-websocket": "^3.1.0",
+    "y-protocols": "^1.0.7",
     "yjs": "^13.6.32"
   }
 }

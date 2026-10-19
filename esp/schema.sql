@@ -331,8 +331,29 @@ CREATE TABLE campaigns (
     org_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
     list_id UUID REFERENCES mailing_lists(id),
     name VARCHAR(255) NOT NULL,
+    subject VARCHAR(255), -- Phase 58: campaign-service's writer had no real subject/body anywhere to send -- see campaign_contact_sends
+    body_html TEXT,
+    body_text TEXT,
     status VARCHAR(50) DEFAULT 'draft', -- draft, sending, completed
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Phase 58: the real per-contact dispatch ledger neither campaign-service
+-- (Java, BatchConfiguration's reader selected every row in `contacts`,
+-- the whole table, with no WHERE clause at all -- any org's campaign send
+-- emailed every other org's contacts too) nor ab_test_engine.go's
+-- dispatchWinningVariant (same problem, documented as a known gap when it
+-- was written) had: a record of who's already been sent a given campaign.
+-- Shared by both so "remaining" means something real instead of
+-- "everyone" -- UNIQUE(campaign_id, contact_id) is what makes a resend
+-- impossible to accidentally duplicate from either language.
+CREATE TABLE campaign_contact_sends (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
+    contact_id UUID REFERENCES contacts(id) ON DELETE CASCADE,
+    variant_id UUID REFERENCES campaign_variants(id) ON DELETE SET NULL,
+    sent_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (campaign_id, contact_id)
 );
 
 CREATE TABLE campaign_variants (
