@@ -272,6 +272,15 @@ func main() {
 	// Phase 55: real session auth (user_auth.go) instead of trusting a
 	// client-supplied X-User-ID header for anything.
 	mux.HandleFunc("POST /api/users/login", handleUserLogin)
+	// Phase 57: "Login with nID" -- the real identity layer; see nid_auth.go.
+	mux.HandleFunc("GET /api/users/login/nid/start", handleNidLoginStart)
+	mux.HandleFunc("GET /api/users/login/nid/callback", handleNidLoginCallback)
+	// Personal mailbox creation now requires an already-authenticated
+	// session (nID or legacy password) -- see handleCreatePersonalMailbox.
+	mux.HandleFunc("POST /api/me/personal-mailbox", userAuthMiddleware(handleCreatePersonalMailbox))
+	// One nID identity, every mailbox it's tied to -- personal plus every
+	// work mailbox assigned to it, across any org.
+	mux.HandleFunc("GET /api/me/mailboxes", userAuthMiddleware(handleMyMailboxes))
 	mux.HandleFunc("GET /api/stats", userAuthMiddleware(handleDashboardStats))
 	mux.HandleFunc("GET /api/domains", userAuthMiddleware(handleDashboardDomains))
 

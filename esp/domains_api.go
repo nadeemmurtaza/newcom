@@ -34,6 +34,17 @@ func mailHostname() string {
 	return "mail.nmail.local"
 }
 
+// personalEmailDomain is the platform's own domain for personal (consumer,
+// self-signup) mailboxes -- the nmail equivalent of gmail.com. Distinct
+// from mailHostname(), which is the MTA's advertised hostname (more like
+// Google's mx.google.com than gmail.com itself).
+func personalEmailDomain() string {
+	if d := os.Getenv("PERSONAL_EMAIL_DOMAIN"); d != "" {
+		return d
+	}
+	return "nmail.local"
+}
+
 // handleCreateDomain lets an org add a domain it will send/receive mail for.
 // POST /api/domains  body: {"domain_name": "example.com"}
 func handleCreateDomain(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -21,6 +22,7 @@ type MailboxSummary struct {
 	ID           string `json:"id"`
 	EmailAddress string `json:"email_address"`
 	IsCatchAll   bool   `json:"is_catch_all"`
+	Kind         string `json:"kind"`
 	CreatedAt    string `json:"created_at"`
 }
 
@@ -36,15 +38,33 @@ func handleCreateMailbox(w http.ResponseWriter, r *http.Request) {
 	domainID := r.PathValue("id")
 
 	var domainName string
-	err := db.QueryRow("SELECT domain_name FROM domains WHERE id = $1 AND org_id = $2", domainID, orgID).Scan(&domainName)
+	var isPersonalDomain bool
+	err := db.QueryRow("SELECT domain_name, is_personal_domain FROM domains WHERE id = $1 AND org_id = $2", domainID, orgID).Scan(&domainName, &isPersonalDomain)
 	if err != nil {
 		http.Error(w, "Domain not found", http.StatusNotFound)
+		return
+	}
+	// Phase 56: this is the "work emails only come from the domain owner"
+	// path, which already holds (org_id must match above) -- but the
+	// platform's own org technically owns the personal-signup domain too,
+	// which would otherwise let it mint unlimited "work" mailboxes there
+	// and make the one-personal-mailbox-per-person cap meaningless.
+	// Personal mailboxes only ever come from handleCreatePersonalMailbox.
+	if isPersonalDomain {
+		http.Error(w, "This domain is reserved for personal email signup; use POST /api/me/personal-mailbox", http.StatusForbidden)
 		return
 	}
 
 	var req struct {
 		LocalPart  string `json:"local_part"`
 		IsCatchAll bool   `json:"is_catch_all"`
+		// Phase 57: optional -- ties this work mailbox to a real nID
+		// identity (nadeemmurtaza/nID) so its owner can see it alongside
+		// their personal mailbox and every other work mailbox they hold,
+		// via GET /api/me/mailboxes, no matter which org assigned it. The
+		// domain owner is still who's authorized to create the mailbox at
+		// all (org_id check above); this only decides who it belongs to.
+		AssigneeNidAccountID string `json:"assignee_nid_account_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -57,12 +77,22 @@ func handleCreateMailbox(w http.ResponseWriter, r *http.Request) {
 	}
 	emailAddress := localPart + "@" + domainName
 
+	var ownerUserID sql.NullString
+	if req.AssigneeNidAccountID != "" {
+		resolvedUserID, err := findOrCreateUserByNidAccount(req.AssigneeNidAccountID, emailAddress)
+		if err != nil {
+			http.Error(w, "Failed to resolve assignee: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		ownerUserID = sql.NullString{String: resolvedUserID, Valid: true}
+	}
+
 	var mailboxID string
 	err = db.QueryRow(`
-		INSERT INTO mailboxes (org_id, email_address, is_catch_all)
-		VALUES ($1, $2, $3)
+		INSERT INTO mailboxes (org_id, email_address, is_catch_all, kind, owner_user_id)
+		VALUES ($1, $2, $3, 'work', $4)
 		RETURNING id
-	`, orgID, emailAddress, req.IsCatchAll).Scan(&mailboxID)
+	`, orgID, emailAddress, req.IsCatchAll, ownerUserID).Scan(&mailboxID)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
 			http.Error(w, "Mailbox already exists", http.StatusConflict)
@@ -127,7 +157,7 @@ func handleListMailboxes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, email_address, is_catch_all, created_at FROM mailboxes
+		SELECT id, email_address, is_catch_all, kind, created_at FROM mailboxes
 		WHERE org_id = $1 AND email_address LIKE '%@' || $2
 		ORDER BY created_at DESC
 	`, orgID, domainName)
@@ -140,7 +170,50 @@ func handleListMailboxes(w http.ResponseWriter, r *http.Request) {
 	var out []MailboxSummary
 	for rows.Next() {
 		var m MailboxSummary
-		if err := rows.Scan(&m.ID, &m.EmailAddress, &m.IsCatchAll, &m.CreatedAt); err == nil {
+		if err := rows.Scan(&m.ID, &m.EmailAddress, &m.IsCatchAll, &m.Kind, &m.CreatedAt); err == nil {
+			out = append(out, m)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
+}
+
+// MyMailboxSummary is handleMyMailboxes' richer view -- it spans orgs, so
+// unlike MailboxSummary it says which org and domain each mailbox is on.
+type MyMailboxSummary struct {
+	ID           string `json:"id"`
+	EmailAddress string `json:"email_address"`
+	Kind         string `json:"kind"`
+	OrgID        string `json:"org_id"`
+	CreatedAt    string `json:"created_at"`
+}
+
+// handleMyMailboxes lists every mailbox tied to the calling identity's
+// nmail user row -- one nID, every mailbox: the one personal mailbox (if
+// created) plus every work mailbox any domain owner, in any org, has
+// assigned to this same nID account (owner_user_id). Deliberately not
+// scoped to one org_id, unlike every other mailbox-listing endpoint --
+// that's the entire point of this one.
+// GET /api/me/mailboxes
+func handleMyMailboxes(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-User-ID") // set by userAuthMiddleware from a verified session
+
+	rows, err := db.Query(`
+		SELECT id, email_address, kind, org_id, created_at FROM mailboxes
+		WHERE owner_user_id = $1
+		ORDER BY kind, created_at
+	`, userID)
+	if err != nil {
+		http.Error(w, "Failed to query mailboxes", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var out []MyMailboxSummary
+	for rows.Next() {
+		var m MyMailboxSummary
+		if err := rows.Scan(&m.ID, &m.EmailAddress, &m.Kind, &m.OrgID, &m.CreatedAt); err == nil {
 			out = append(out, m)
 		}
 	}

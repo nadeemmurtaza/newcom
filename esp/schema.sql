@@ -28,7 +28,15 @@ CREATE TABLE organizations (
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255), -- Phase 57: nullable -- an nID-authenticated user has no local password at all; see nid_account_id below
+    -- Phase 57: nID is the one identity above all of this -- every human
+    -- in nmail resolves to exactly one nID Account (nadeemmurtaza/nID),
+    -- enforced here by the UNIQUE constraint ("one person, one nID, no
+    -- duplication"). A person's single personal mailbox and every work
+    -- mailbox they've been assigned, across any org, all hang off this
+    -- same users.id. See nid_auth.go for the "Login with nID" flow that
+    -- populates it.
+    nid_account_id VARCHAR(255) UNIQUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -64,7 +72,14 @@ CREATE TABLE domains (
     
     -- Phase 41: White-Label Portal Domain
     portal_domain VARCHAR(255) UNIQUE,
-    
+
+    -- Phase 56: marks the platform's own personal-signup domain (like
+    -- gmail.com is Google's). handleCreateMailbox refuses to create a
+    -- "work" mailbox on this domain -- personal mailboxes only come from
+    -- signup (user_auth.go), which is what keeps the one-per-person cap
+    -- meaningful instead of bypassable through the normal mailbox API.
+    is_personal_domain BOOLEAN DEFAULT FALSE,
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -159,14 +174,26 @@ CREATE TABLE mailboxes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
     email_address VARCHAR(255) UNIQUE NOT NULL,
-    
+
     -- Phase 39: Enterprise Mailboxes
     is_catch_all BOOLEAN DEFAULT FALSE,
     daily_send_limit INT DEFAULT 2000,
     litigation_hold BOOLEAN DEFAULT FALSE, -- Phase 52: HandleMessageDeletion referenced this with no column
-    
+
+    -- Phase 56: Personal vs. Work mailboxes. A work mailbox is created
+    -- only by whoever owns/verified its domain (handleCreateMailbox,
+    -- already org_id-gated); a personal mailbox is created by the person
+    -- themself via signup (user_auth.go) on the platform's own domain, and
+    -- is capped at one per person by the partial unique index below.
+    kind VARCHAR(10) NOT NULL DEFAULT 'work', -- 'work' | 'personal'
+    owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Enforces "only one personal email per person" at the database level, not
+-- just in application code.
+CREATE UNIQUE INDEX one_personal_mailbox_per_user ON mailboxes(owner_user_id) WHERE kind = 'personal';
 
 CREATE TABLE email_aliases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
