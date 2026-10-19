@@ -21,11 +21,22 @@ services:
       - redisdata:/data
     restart: unless-stopped
 
-  mta:
-    image: mailhog/mailhog:latest
+  app:
+    build: .
+    depends_on:
+      - db
+      - redis
+    environment:
+      DATABASE_URL: postgres://esp_user:esp_password@db:5432/esp_db?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      # Generate with: openssl rand -base64 24 | cut -c1-32
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:-mail.nmail.local}
+      PORT: "8080"
+      SMTP_PORT: "2525"
     ports:
-      - "1025:1025" # SMTP port
-      - "8025:8025" # Web UI port
+      - "8080:8080" # HTTP API / dashboard
+      - "2525:2525" # Inbound SMTP (front with a :25 relay or port-forward in prod)
     restart: unless-stopped
 
 volumes:

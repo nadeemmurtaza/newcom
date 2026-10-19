@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -21,8 +22,18 @@ import (
 // 1. SECURITY: AES-256-GCM Encryption at Rest
 // ==========================================
 
-// In a real system, this is fetched from a KMS (Key Management Service).
-var masterEncryptionKey = []byte("my-32-byte-ultra-secure-pass-key") 
+// Phase 50: Load the master key from the environment (ideally backed by a
+// real KMS) instead of a literal in source. A hardcoded key means anyone
+// with read access to this repo could decrypt everything at rest.
+var masterEncryptionKey = loadMasterEncryptionKey()
+
+func loadMasterEncryptionKey() []byte {
+	key := os.Getenv("MASTER_ENCRYPTION_KEY")
+	if len(key) != 32 {
+		log.Fatal("MASTER_ENCRYPTION_KEY must be set to exactly 32 bytes (AES-256). Generate one with: openssl rand -base64 24 | cut -c1-32")
+	}
+	return []byte(key)
+}
 
 func EncryptAES(plaintext []byte) ([]byte, error) {
 	block, err := aes.NewCipher(masterEncryptionKey)

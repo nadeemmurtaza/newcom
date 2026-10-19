@@ -191,6 +191,8 @@ CREATE TABLE messages (
     recipients TEXT NOT NULL,
     subject VARCHAR(255),
     snippet VARCHAR(255),
+    body_text TEXT, -- Phase 50: Inbound SMTP body storage (plain text)
+    body_html TEXT, -- Phase 50: Inbound SMTP body storage (HTML)
     colossus_blob_id VARCHAR(255), -- Phase 27: Pointer to raw bytes in Colossus
     smart_replies JSONB, -- Phase 27: AI Quick Replies
     category VARCHAR(50) DEFAULT 'primary',

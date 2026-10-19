@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
@@ -61,7 +62,7 @@ func main() {
 	var err error
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://esp_user:password@localhost:5432/esp_user?sslmode=disable"
+		dbURL = "postgres://esp_user:esp_password@localhost:5432/esp_db?sslmode=disable"
 	}
 	db, err = sql.Open("postgres", dbURL)
 	if err != nil {
@@ -152,6 +153,10 @@ func main() {
 	globalWorkerWg.Add(1)
 	go startIPWarmupCron(globalWorkerCtx, &globalWorkerWg, db)
 
+	// Phase 50: Real Inbound SMTP Receiver (replaces the never-finished C++ stub)
+	globalWorkerWg.Add(1)
+	go startInboundSMTPServer(globalWorkerCtx, &globalWorkerWg, db, rdb)
+
 	go StartScheduler(globalWorkerCtx, &globalWorkerWg, db, rdb)
 
 	// Phase 31: Initialize Rules Engine & Context-Aware Access
@@ -233,7 +238,14 @@ func main() {
 	
 	// Phase 39: Inbound Route
 	mux.HandleFunc("POST /v1/inbound", handleInboundEmail)
-	
+
+	// Phase 50: Domain & Mailbox Provisioning (unlimited mailboxes per domain)
+	mux.HandleFunc("POST /api/domains", authMiddleware(handleCreateDomain))
+	mux.HandleFunc("GET /api/domains/{id}", authMiddleware(handleGetDomain))
+	mux.HandleFunc("POST /api/domains/{id}/mailboxes", authMiddleware(handleCreateMailbox))
+	mux.HandleFunc("GET /api/domains/{id}/mailboxes", authMiddleware(handleListMailboxes))
+	mux.HandleFunc("DELETE /api/mailboxes/{id}", authMiddleware(handleDeleteMailbox))
+
 	mux.HandleFunc("GET /health", handleHealthCheck)
 	
 	// Phase 3: Tracking & Bounces
@@ -615,6 +627,12 @@ func handleApproveCampaign(w http.ResponseWriter, r *http.Request) {
 }
 
 // Phase 39: Inbound Email Routing (Aliases & Catch-Alls)
+//
+// This HTTP path exists for inbound mail delivered by an external relay or
+// MTA that prefers to hand off a parsed message over HTTP instead of
+// speaking raw SMTP to this process. The raw-SMTP path is startInboundSMTPServer
+// in inbound_smtp.go; both share persistInboundMessage so delivery is
+// identical either way.
 func handleInboundEmail(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DomainID string `json:"domain_id"`
@@ -622,28 +640,31 @@ func handleInboundEmail(w http.ResponseWriter, r *http.Request) {
 		From     string `json:"from"`
 		Subject  string `json:"subject"`
 		Body     string `json:"body"`
+		BodyHTML string `json:"body_html"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	// 1. Resolve recipient through Alias / Catch-All logic
-	mailboxID, err := mailboxManager.ResolveRecipient(req.DomainID, req.To)
-	if err != nil {
-		log.Printf("Inbound Route Failed: No mailbox, alias, or catch-all found for %s", req.To)
+	var orgID string
+	if err := db.QueryRow("SELECT org_id FROM domains WHERE id = $1", req.DomainID).Scan(&orgID); err != nil {
+		log.Printf("Inbound Route Failed: Unknown domain_id %s", req.DomainID)
+		http.Error(w, "550 No such domain here", http.StatusNotFound)
+		return
+	}
+
+	threadID := uuid.NewString()
+	if err := persistInboundMessage(db, rdb, orgID, req.DomainID, req.From, req.To, req.To, req.Subject, req.Body, req.BodyHTML, threadID); err != nil {
+		log.Printf("Inbound Route Failed: No mailbox, alias, or catch-all found for %s: %v", req.To, err)
 		http.Error(w, "550 No such user here", http.StatusNotFound)
 		return
 	}
 
-	// Phase 42: Intelligent Inbound Routing (Spam Classification)
-	targetFolderID := mailboxManager.ClassifyInbound(mailboxID, req.Subject, req.Body)
-
-	log.Printf("Inbound Route Success: %s mapped to mailbox_id %s, routed to folder %s", req.To, mailboxID, targetFolderID)
-	
-	// Simulate writing to DB/Colossus
+	log.Printf("Inbound Route Success: %s delivered", req.To)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status": "DELIVERED", "mailbox_id": "`+mailboxID+`", "folder_id": "`+targetFolderID+`"}`))
+	w.Write([]byte(`{"status": "DELIVERED"}`))
 }
 
 // Phase 43: Postmaster Handlers
