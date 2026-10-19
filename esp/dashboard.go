@@ -28,7 +28,7 @@ func hasPermission(userID string, orgID string, requiredPermission string) bool 
 
 func handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	orgID := r.URL.Query().Get("org_id")
-	userID := r.Header.Get("X-User-ID") // Mocked Session User
+	userID := r.Header.Get("X-User-ID") // set by userAuthMiddleware (user_auth.go) from a verified session
 
 	if orgID == "" || userID == "" {
 		http.Error(w, "Missing org_id or X-User-ID", http.StatusBadRequest)

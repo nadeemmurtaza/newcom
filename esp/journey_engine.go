@@ -133,29 +133,57 @@ func executeDAGNode(db *sql.DB, rdb *redis.Client, contactID, email, orgID strin
 		if node.NextNodeID.Valid { nextID = node.NextNodeID.String }
 		
 	case "ACTION_SEND_EMAIL":
-		// Construct SendEmailRequest and push to queue
+		// Phase 55: resolve a real verified domain this org owns instead of
+		// the nonsense "automation@<uuid>.com" placeholder -- that domain
+		// never existed, so DKIM signing (outbound_dkim.go) would find no
+		// key for it and every journey email went out unsigned from an
+		// address nobody could reply to.
+		fromAddress := "automation@" + mailHostname()
+		var verifiedDomain string
+		if err := db.QueryRow("SELECT domain_name FROM domains WHERE org_id = $1 AND is_verified = true LIMIT 1", orgID).Scan(&verifiedDomain); err == nil {
+			fromAddress = "automation@" + verifiedDomain
+		}
+
+		msgID := "journey_" + contactID + "_" + fmt.Sprintf("%d", time.Now().UnixNano())
 		req := SendEmailRequest{
-			MessageID: "journey_" + contactID + "_" + fmt.Sprintf("%d", time.Now().UnixNano()),
+			MessageID: msgID,
 			OrgID:     orgID,
 			To:        email,
-			From:      "automation@" + orgID + ".com", // Simulated generic from
+			From:      fromAddress,
 		}
-		
+
 		if subj, ok := node.Config["subject"].(string); ok { req.Subject = subj }
 		if body, ok := node.Config["body"].(string); ok { req.Body = body }
 		if tplID, ok := node.Config["template_id"].(string); ok { req.TemplateID = tplID }
 
 		reqJSON, _ := json.Marshal(req)
 		rdb.LPush(context.Background(), "email_outbound_queue", reqJSON)
-		
+
+		// Record which message this contact's next CONDITION_OPENED node
+		// (if any) should check for an open event.
+		db.Exec("UPDATE journey_contacts SET last_sent_message_id = $1 WHERE id = $2", msgID, contactID)
+
 		log.Printf("[Journey Engine] Executed ACTION_SEND_EMAIL for %s", email)
 		if node.NextNodeID.Valid { nextID = node.NextNodeID.String }
 
 	case "CONDITION_OPENED":
-		// Check Redis telemetry to see if they opened the previous email
-		// For simulation, we randomly determine or check a mock key
-		// In a real system, we'd check if `track:open:journey_<contact_id>...` exists
-		opened := false // Simulating logic
+		// Phase 55: this used to hardcode opened := false and never check
+		// anything -- every CONDITION_OPENED branch always took the "not
+		// opened" path, regardless of whether the recipient ever opened the
+		// email. handleTrackOpen (tracking.go) logs a real 'open' row in
+		// events keyed by message_id when the tracking pixel fires; check
+		// that instead.
+		var lastMessageID sql.NullString
+		db.QueryRow("SELECT last_sent_message_id FROM journey_contacts WHERE id = $1", contactID).Scan(&lastMessageID)
+
+		opened := false
+		if lastMessageID.Valid {
+			db.QueryRow(
+				"SELECT EXISTS(SELECT 1 FROM events WHERE message_id = $1 AND event_type = 'open')",
+				lastMessageID.String,
+			).Scan(&opened)
+		}
+
 		if opened {
 			if node.NextNodeID.Valid { nextID = node.NextNodeID.String }
 		} else {

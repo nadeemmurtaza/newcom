@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -186,10 +187,17 @@ func (mta *MTATrafficShaper) PerformHandshake(session *SMTPSession) (int, error)
 		return extractSMTPCode(err), err
 	}
 
-	// Try STARTTLS if supported
+	// Try STARTTLS if supported.
+	//
+	// Phase 55: this passed a nil tls.Config, which crypto/tls treats as an
+	// empty config -- ServerName unset. Without ServerName (and without
+	// InsecureSkipVerify, which this correctly never sets), certificate
+	// verification has no hostname to check against, so the "encrypted"
+	// connection's certificate was never properly validated against the
+	// actual MX host. Real fix: verify against the MX hostname we just
+	// resolved and dialed.
 	if ok, _ := client.Extension("STARTTLS"); ok {
-		// In production, configure tls.Config properly
-		if err = client.StartTLS(nil); err != nil {
+		if err = client.StartTLS(&tls.Config{ServerName: mxs[0].Host}); err != nil {
 			log.Printf("[MTA] STARTTLS failed or rejected by %s: %v", mxs[0].Host, err)
 			// Continue unencrypted or return error depending on strictness
 		}

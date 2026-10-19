@@ -68,10 +68,19 @@ CREATE TABLE domains (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Phase 55: GenerateImpersonationToken (org_manager.go) joined sub_accounts
+-- to a "roles" table that never existed in this schema -- every call to it
+-- errored unconditionally, for every caller, regardless of role.
+CREATE TABLE roles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) UNIQUE NOT NULL -- e.g. 'System Admin'
+);
+
 CREATE TABLE sub_accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
     domain_id UUID REFERENCES domains(id) ON DELETE SET NULL,
+    role_id UUID REFERENCES roles(id) ON DELETE SET NULL,
     account_name VARCHAR(100) NOT NULL, -- e.g., 'Marketing', 'Transactional'
     status VARCHAR(50) DEFAULT 'active', -- Phase 30: active, suspended_for_security
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -89,8 +98,9 @@ CREATE TABLE api_keys (
 CREATE TABLE IF NOT EXISTS caa_policies (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id UUID REFERENCES organizations(id),
-    app_name VARCHAR(255) NOT NULL, 
-    cel_expression TEXT NOT NULL, 
+    app_name VARCHAR(255) NOT NULL,
+    cel_expression TEXT NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE, -- Phase 55: EvaluateCAA (rules_engine.go) filters on this; it never existed, so every CAA check errored and denied, unconditionally, for every org
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -516,14 +526,14 @@ CREATE TABLE activity_rules (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE caa_policies (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    org_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
-    app_name VARCHAR(100) NOT NULL, -- e.g., 'Google Drive', 'Gmail'
-    cel_expression TEXT, -- Phase 32: Advanced CEL Logic (Device + IP)
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
+-- Phase 55: this file used to declare caa_policies TWICE -- this exact
+-- duplicate (identical structure, just missing "IF NOT EXISTS") and the
+-- real one near the top. Because Postgres evaluates the file in order and
+-- the earlier one used IF NOT EXISTS, IT always won and this one always
+-- errored "relation already exists" on a fresh load -- which also meant
+-- this duplicate's is_active column never actually took effect; the
+-- earlier table silently lacked it until fixed directly on that
+-- definition. Removed; see the real caa_policies definition above.
 
 -- ==========================================
 -- Phase 44: Automation & Journey Builder
@@ -554,6 +564,7 @@ CREATE TABLE journey_contacts (
     current_node_id UUID REFERENCES journey_nodes(id) ON DELETE SET NULL,
     status VARCHAR(50) DEFAULT 'IN_PROGRESS', -- IN_PROGRESS, COMPLETED, FAILED
     next_execute_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    last_sent_message_id VARCHAR(255), -- Phase 55: lets CONDITION_OPENED check a real open event
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(journey_id, email)
 );

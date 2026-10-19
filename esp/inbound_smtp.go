@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
@@ -174,10 +175,12 @@ func persistInboundMessage(db *sql.DB, rdb *redis.Client, orgID, domainID, from,
 		return err
 	}
 
-	_, err = tx.Exec(`
+	var insertedMessageID string
+	err = tx.QueryRow(`
 		INSERT INTO messages (org_id, mailbox_id, folder_id, sender, recipients, subject, snippet, body_text, body_html, thread_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, orgID, mailboxID, folderID, from, recipientsJoined, subject, snippet, bodyText, bodyHTML, threadID)
+		RETURNING id
+	`, orgID, mailboxID, folderID, from, recipientsJoined, subject, snippet, bodyText, bodyHTML, threadID).Scan(&insertedMessageID)
 	if err != nil {
 		return err
 	}
@@ -194,6 +197,16 @@ func persistInboundMessage(db *sql.DB, rdb *redis.Client, orgID, domainID, from,
 			Metadata:  to,
 			Timestamp: time.Now().Unix(),
 		})
+
+		// Phase 55: feed the LSM-tree search indexer (gmail_pipeline.go) --
+		// this used to only fire from a dead parallel pipeline nothing ever
+		// produced into, so real mail was never search-indexed.
+		eventBytes, _ := json.Marshal(map[string]string{
+			"msg_id":     insertedMessageID,
+			"mailbox_id": mailboxID,
+			"action":     "NEW_MAIL",
+		})
+		rdb.Publish(context.Background(), "email_success_stream", eventBytes)
 	}
 	return nil
 }

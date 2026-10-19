@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -18,6 +19,8 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
+	"github.com/stripe/stripe-go/v81"
+	"github.com/stripe/stripe-go/v81/webhook"
 )
 
 var db *sql.DB
@@ -95,7 +98,7 @@ func main() {
 	rateLimiter = NewRateLimiter(rdb)
 	idempotencyEngine = NewIdempotencyEngine(rdb)
 	tenantManager = NewTenantManager(db, rdb)
-	globalOrgManager = NewOrgManager(db)
+	globalOrgManager = NewOrgManager(db, rdb)
 	mailboxManager = NewMailboxManager(db, rdb)
 	globalBrandingManager = NewBrandingManager(db, rdb)
 	globalPostmaster = NewPostmasterManager(rdb, db)
@@ -121,12 +124,10 @@ func main() {
 	// Phase 30: Initialize Identity Risk Engine (Kill Switch)
 	riskEngine := NewIdentityRiskEngine(db, rdb)
 
-	globalWorkerWg.Add(1)
-	go startHeavyGuardWorker(globalWorkerCtx, &globalWorkerWg, db, rdb)
-	
-	globalWorkerWg.Add(1)
-	go startDeliveryWorker(globalWorkerCtx, &globalWorkerWg, db, rdb)
-
+	// Phase 55: startHeavyGuardWorker/startDeliveryWorker removed -- they
+	// drained "email_inbound_queue", which nothing ever fed (the real
+	// inbound path, startInboundSMTPServer, writes straight to Postgres).
+	// See gmail_pipeline.go.
 	globalWorkerWg.Add(1)
 	go startSearchIndexerWorker(globalWorkerCtx, &globalWorkerWg, db, rdb, GlobalLSM)
 	
@@ -268,8 +269,11 @@ func main() {
 	mux.HandleFunc("POST /v1/webhooks/stripe", handleStripeWebhook)
 
 	// Phase 4: Dashboard API
-	mux.HandleFunc("GET /api/stats", handleDashboardStats)
-	mux.HandleFunc("GET /api/domains", handleDashboardDomains)
+	// Phase 55: real session auth (user_auth.go) instead of trusting a
+	// client-supplied X-User-ID header for anything.
+	mux.HandleFunc("POST /api/users/login", handleUserLogin)
+	mux.HandleFunc("GET /api/stats", userAuthMiddleware(handleDashboardStats))
+	mux.HandleFunc("GET /api/domains", userAuthMiddleware(handleDashboardDomains))
 
 	// Phase 6: Mailbox API
 	// Phase 52: every handler below now enforces that the session's mailbox
@@ -299,13 +303,17 @@ func main() {
 	mux.HandleFunc("DELETE /api/mailbox/messages/", mailboxAuthMiddleware(handleDeleteMessage))
 
 	// Phase 7: Templates API
-	mux.HandleFunc("/api/templates", handleTemplates)
+	mux.HandleFunc("/api/templates", userAuthMiddleware(handleTemplates))
 
 	// Phase 8: Webhooks API
-	mux.HandleFunc("/api/webhooks", handleWebhooks)
+	mux.HandleFunc("/api/webhooks", userAuthMiddleware(handleWebhooks))
 
 	// Phase 24: Workspace Ecosystem
-	mux.HandleFunc("GET /api/search", handleSearch)
+	// Phase 55: this had no auth at all -- any caller could pass any
+	// org_id and search that org's mail (moot in practice until the RLS
+	// fix above, since every result was silently empty, but still a real
+	// IDOR once that's fixed).
+	mux.HandleFunc("GET /api/search", userAuthMiddleware(handleSearch))
 	mux.HandleFunc("POST /api/drive/upload", handleDriveUpload)
 	mux.HandleFunc("POST /api/calendar/events", handleCalendarCreate)
 
@@ -403,6 +411,24 @@ func main() {
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Phase 55: this is the actual consumer for tokens minted by
+		// GenerateImpersonationToken (org_manager.go). Before this, nothing
+		// anywhere checked that token for anything -- a System Admin could
+		// call /api/support/impersonate, get a token back, and it granted
+		// precisely nothing. An admin session presenting a valid token acts
+		// with the impersonated org's identity for this request.
+		if impToken := r.Header.Get("X-Impersonation-Token"); impToken != "" {
+			adminSubAccountID, targetOrgID, ok := globalOrgManager.VerifyImpersonationToken(impToken)
+			if !ok {
+				http.Error(w, "Unauthorized: Invalid or expired impersonation token", http.StatusUnauthorized)
+				return
+			}
+			r.Header.Set("X-SubAccount-ID", adminSubAccountID)
+			r.Header.Set("X-Org-ID", targetOrgID)
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		apiKey := r.Header.Get("Authorization")
 		if apiKey == "" {
 			http.Error(w, "Unauthorized: Missing API Key", http.StatusUnauthorized)
@@ -761,29 +787,55 @@ func handleTriggerJourney(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status": "SUCCESS", "message": "Contact injected into Journey successfully"}`))
 }
 
-// Phase 47: Stripe Webhook Handler
+// Phase 47/55: Stripe Webhook Handler
+//
+// This used to json.Decode the request body directly and act on whatever it
+// said -- no signature check at all. Anyone who knew (or guessed) an org's
+// Stripe customer ID could POST a fake "invoice.paid" to reactivate a
+// suspended org for free, or a fake "invoice.payment_failed" to lock out a
+// competitor. Now verifies the Stripe-Signature header against
+// STRIPE_WEBHOOK_SECRET via the real Stripe SDK before touching anything.
 func handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		Type string `json:"type"`
-		Data struct {
-			Object struct {
-				InvoiceID    string `json:"id"`
-				CustomerID   string `json:"customer"`
-				AmountDue    int    `json:"amount_due"`
-			} `json:"object"`
-		} `json:"data"`
+	webhookSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
+	if webhookSecret == "" {
+		log.Printf("Stripe webhook rejected: STRIPE_WEBHOOK_SECRET is not configured")
+		http.Error(w, "Webhook not configured", http.StatusServiceUnavailable)
+		return
 	}
-	
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+
+	const maxStripeBodyBytes = 64 * 1024
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxStripeBodyBytes+1))
+	if err != nil || len(body) > maxStripeBodyBytes {
 		http.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	// Resolve org_id from stripe_customer_id
-	var orgID string
-	err := db.QueryRow("SELECT org_id FROM billing_subscriptions WHERE stripe_customer_id = $1", payload.Data.Object.CustomerID).Scan(&orgID)
-	if err == nil && orgID != "" {
-		globalBillingEngine.ProcessStripeWebhook(payload.Type, orgID, payload.Data.Object.InvoiceID, payload.Data.Object.AmountDue)
+	event, err := webhook.ConstructEvent(body, r.Header.Get("Stripe-Signature"), webhookSecret)
+	if err != nil {
+		log.Printf("Stripe webhook signature verification failed: %v", err)
+		http.Error(w, "Invalid signature", http.StatusBadRequest)
+		return
+	}
+
+	switch event.Type {
+	case "invoice.payment_failed", "invoice.paid":
+		var invoice stripe.Invoice
+		if err := json.Unmarshal(event.Data.Raw, &invoice); err != nil {
+			log.Printf("Stripe webhook: failed to parse invoice payload: %v", err)
+			http.Error(w, "Invalid event payload", http.StatusBadRequest)
+			return
+		}
+		if invoice.Customer == nil || invoice.Customer.ID == "" {
+			w.WriteHeader(http.StatusOK) // nothing to do, but it's a validly-signed event
+			return
+		}
+
+		var orgID string
+		if err := db.QueryRow("SELECT org_id FROM billing_subscriptions WHERE stripe_customer_id = $1", invoice.Customer.ID).Scan(&orgID); err == nil && orgID != "" {
+			globalBillingEngine.ProcessStripeWebhook(string(event.Type), orgID, invoice.ID, int(invoice.AmountDue))
+		}
+	default:
+		log.Printf("Stripe webhook: ignoring unhandled event type %s", event.Type)
 	}
 
 	w.WriteHeader(http.StatusOK)

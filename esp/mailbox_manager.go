@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Phase 39: Enterprise Mailbox System
@@ -93,22 +94,33 @@ func (mm *MailboxManager) CheckVelocityLimit(ctx context.Context, mailboxID stri
 }
 
 // 3. App Password Verification
+//
+// Phase 55: this queried "WHERE token_hash = $1" with the raw plaintext
+// token -- token_hash stores a bcrypt hash (see mailboxes_api.go,
+// mailbox_auth.go), which can never equal its own plaintext input. This
+// could not have matched a real app password, ever; it was also unused
+// anywhere in the codebase. Fixed to actually bcrypt-compare, same
+// approach handleMailboxLogin (mailbox_auth.go) uses -- since app
+// passwords aren't looked up by email here, this has to scan every row.
 func (mm *MailboxManager) VerifyAppPassword(token string) (string, error) {
-	// In production, token should be hashed and compared. We simulate direct lookup here.
-	var mailboxID string
-	err := mm.db.QueryRow(`
-		SELECT mailbox_id FROM app_passwords 
-		WHERE token_hash = $1
-	`, token).Scan(&mailboxID)
-	
+	rows, err := mm.db.Query("SELECT id, mailbox_id, token_hash FROM app_passwords")
 	if err != nil {
 		return "", fmt.Errorf("Invalid App Password")
 	}
+	defer rows.Close()
 
-	// Update last used
-	mm.db.Exec("UPDATE app_passwords SET last_used_at = NOW() WHERE token_hash = $1", token)
+	for rows.Next() {
+		var id, mailboxID, hash string
+		if err := rows.Scan(&id, &mailboxID, &hash); err != nil {
+			continue
+		}
+		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(token)) == nil {
+			mm.db.Exec("UPDATE app_passwords SET last_used_at = NOW() WHERE id = $1", id)
+			return mailboxID, nil
+		}
+	}
 
-	return mailboxID, nil
+	return "", fmt.Errorf("Invalid App Password")
 }
 // Phase 42: Mailbox Initialization (System Folders)
 func (mm *MailboxManager) InitializeMailbox(orgID, emailAddress string) (string, error) {

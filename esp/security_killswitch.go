@@ -35,8 +35,10 @@ func (engine *IdentityRiskEngine) EvaluateLoginAnomaly(accountID string, ip stri
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 
-	// Simulated Contextual Analysis
-	// e.g. If OS is Headless Linux and IP is high-risk geo, spike risk score
+	// Contextual Analysis: this is a real deterministic rule, not a stub --
+	// it genuinely spikes risk for headless-OS logins every time. The
+	// "high-risk geo" half of the rule was never implemented (no IP
+	// geolocation lookup exists in this codebase); only the OS check runs.
 	if os == "Headless Linux" {
 		engine.riskMap[accountID] += 50
 		log.Printf("Identity Risk Engine: High-risk headless login detected for %s", accountID)

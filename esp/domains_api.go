@@ -37,14 +37,16 @@ func mailHostname() string {
 // handleCreateDomain lets an org add a domain it will send/receive mail for.
 // POST /api/domains  body: {"domain_name": "example.com"}
 func handleCreateDomain(w http.ResponseWriter, r *http.Request) {
+	// Phase 55: this used to also check hasPermission(userID, orgID, ...)
+	// but only `if userID != ""` -- simply omitting the X-User-ID header
+	// (which nothing verified anyway; see user_auth.go) skipped the
+	// permission check entirely rather than failing it. Domain creation is
+	// authorized by the org API key alone (authMiddleware, which this
+	// route is wrapped in) -- the same model /v1/send and every other
+	// API-key-authenticated route already uses.
 	orgID := r.Header.Get("X-Org-ID")
-	userID := r.Header.Get("X-User-ID")
 	if orgID == "" {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if userID != "" && !hasPermission(userID, orgID, "domains:write") {
-		http.Error(w, "Forbidden: Missing domains:write permission", http.StatusForbidden)
 		return
 	}
 

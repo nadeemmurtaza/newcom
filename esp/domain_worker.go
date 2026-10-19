@@ -47,12 +47,22 @@ func startContinuousDNSWorker(ctx context.Context, wg *sync.WaitGroup, db *sql.D
 			rows.Close()
 
 			for _, dc := range toCheck {
-				// 1. Verify SPF
+				// 1. Verify SPF -- same real check as handleDomainVerify
+				// (dns_checker.go): require the "mx"/"a" mechanism or an
+				// explicit include of our hostname, not just any SPF record.
 				spfVerified := false
 				txtRecords, _ := net.LookupTXT(dc.DomainName)
 				for _, txt := range txtRecords {
-					if strings.HasPrefix(txt, "v=spf1") {
-						spfVerified = true
+					if !strings.HasPrefix(txt, "v=spf1") {
+						continue
+					}
+					for _, mechanism := range strings.Fields(txt) {
+						if mechanism == "mx" || mechanism == "a" || mechanism == "include:"+mailHostname() {
+							spfVerified = true
+							break
+						}
+					}
+					if spfVerified {
 						break
 					}
 				}

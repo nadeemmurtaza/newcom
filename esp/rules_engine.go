@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"log"
 	"net"
-	"strings"
 )
 
 // Phase 31: Rules Engine & Context-Aware Access
@@ -91,36 +90,15 @@ func (re *RulesEngine) EvaluateCAA(orgID string, appName string, ctx RequestCont
 		return false // Secure fail on error
 	}
 
-	// -------------------------------------------------------------------------
-	// Simulated CEL Engine (Common Expression Language Evaluator)
-	// In production, we'd use github.com/google/cel-go
-	// Here we simulate the logic:
-	// (device.is_managed == true && device.screen_lock_enabled == true) || in_subnet(request.ip, "198.51.100.0/24")
-	// -------------------------------------------------------------------------
-
-	// 1. Evaluate Device Posture
-	deviceSecure := ctx.IsManaged && ctx.ScreenLockEnabled
-
-	// 2. Evaluate Network Context
-	// We extract the CIDR from the string if it contains `in_subnet`
-	networkSecure := false
-	if strings.Contains(celExpression, "in_subnet(request.ip,") {
-		// Quick parse of the CIDR (e.g. 'in_subnet(request.ip, "198.51.100.0/24")')
-		parts := strings.Split(celExpression, `"`)
-		if len(parts) >= 3 {
-			cidr := parts[1]
-			_, subnet, err := net.ParseCIDR(cidr)
-			if err == nil {
-				clientIP := net.ParseIP(ctx.IP)
-				if subnet.Contains(clientIP) {
-					networkSecure = true
-				}
-			}
-		}
+	// Phase 54: real CEL evaluation (github.com/google/cel-go) of whatever
+	// expression the policy actually stores -- see cel_eval.go. This used
+	// to hand-parse one specific hardcoded expression shape; any policy
+	// phrased differently silently fell through to a device-only check.
+	isAuthorized, err := evaluateCELPolicy(celExpression, ctx)
+	if err != nil {
+		log.Printf("CAA policy for org %s app %s failed to evaluate: %v. Secure-failing (denying access).", orgID, appName, err)
+		return false
 	}
-
-	// 3. Evaluate the Logical OR
-	isAuthorized := deviceSecure || networkSecure
 
 	if !isAuthorized {
 		log.Printf("CONTEXT-AWARE ACCESS BLOCKED: User at IP %s (Managed: %v) denied access to %s. Failed CEL: %s", 

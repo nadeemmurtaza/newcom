@@ -115,13 +115,28 @@ func handleDomainVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Verify SPF (Look for "v=spf1 include:esp.com" or similar)
+	// 1. Verify SPF.
+	//
+	// Phase 55: this used to accept ANY record starting with "v=spf1" as
+	// proof the domain was set up right -- a domain with SPF configured
+	// for Google Workspace and nothing else would pass, even though it
+	// does not authorize us to send as that domain at all. domains_api.go
+	// tells operators to publish "v=spf1 mx ~all", so actually check for
+	// the "mx" mechanism (or an explicit include of our own hostname) --
+	// not just that *a* SPF record of *some* kind exists.
 	spfVerified := false
 	txtRecords, _ := net.LookupTXT(domainName)
 	for _, txt := range txtRecords {
-		if strings.HasPrefix(txt, "v=spf1") {
-			// In a real ESP, we'd regex for "include:sendgrid.net" etc. We'll simulate success if any SPF exists for MVP.
-			spfVerified = true
+		if !strings.HasPrefix(txt, "v=spf1") {
+			continue
+		}
+		for _, mechanism := range strings.Fields(txt) {
+			if mechanism == "mx" || mechanism == "a" || mechanism == "include:"+mailHostname() {
+				spfVerified = true
+				break
+			}
+		}
+		if spfVerified {
 			break
 		}
 	}

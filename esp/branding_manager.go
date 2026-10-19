@@ -81,13 +81,13 @@ const BrandingContextKey contextKey = "brandingConfig"
 func (bm *BrandingManager) BrandingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
-		
-		// Skip if it's the master API domain to avoid overhead
-		if strings.HasSuffix(host, "ouresp.com") || host == "localhost" || host == "127.0.0.1" {
-			// Actually for local testing, we might want to simulate it, but let's always try resolving
-			// if it fails, we just continue normally (as Master ESP context).
-		}
 
+		// Phase 55: this used to have an empty if-block here ("skip if
+		// it's the master API domain") that did nothing at all -- the
+		// lookup below always ran regardless, and the check itself named
+		// "ouresp.com", a domain nobody deploying this owns. Removed the
+		// dead branch; GetBrandingByHost already no-ops correctly (err !=
+		// nil) for a host with no white-label config.
 		config, err := bm.GetBrandingByHost(r.Context(), host)
 		if err == nil && config != nil {
 			// Inject White-Label Context

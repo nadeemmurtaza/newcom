@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -49,11 +50,11 @@ func evaluateMatureABTests(db *sql.DB, rdb *redis.Client) {
 			continue
 		}
 
-		evaluateSingleTest(db, testID, campaignID, orgID)
+		evaluateSingleTest(db, rdb, testID, campaignID, orgID)
 	}
 }
 
-func evaluateSingleTest(db *sql.DB, testID, campaignID, orgID string) {
+func evaluateSingleTest(db *sql.DB, rdb *redis.Client, testID, campaignID, orgID string) {
 	log.Printf("[AB Engine] Evaluating test %s for Campaign %s", testID, campaignID)
 
 	// Fetch variants
@@ -95,12 +96,60 @@ func evaluateSingleTest(db *sql.DB, testID, campaignID, orgID string) {
 
 	if winnerID != "" {
 		log.Printf("[AB Engine] -> WINNER DECLARED: Variant %s (Subject: %s) with %.2f%% Open Rate", winnerName, winnerSubject, highestRate*100)
-		
+
 		// 1. Lock the winner in DB
 		db.Exec("UPDATE ab_tests SET status = 'CONCLUDED', winner_variant_id = $1 WHERE id = $2", winnerID, testID)
-		
-		// 2. Dispatch the remaining 80% of the audience
-		// (Simulated dispatch of remainder)
-		log.Printf("[AB Engine] -> Dispatching remaining 80%% of Audience for Campaign %s using winning Variant %s", campaignID, winnerName)
+
+		// 2. Dispatch the remainder of the audience with the winning variant.
+		//
+		// Phase 55: this used to be a log line and nothing else -- no job
+		// ever reached email_outbound_queue. It now really enqueues one
+		// real send per remaining contact, same path journey_engine.go
+		// uses. Known limitation: this schema has no per-contact dispatch
+		// log for the campaign, so "remainder" here means "everyone on the
+		// list" rather than "the 80% who didn't get the initial test
+		// split" -- getting the split itself exactly right needs a
+		// campaign_contacts/sent-log table this project doesn't have yet.
+		dispatchWinningVariant(db, rdb, campaignID, orgID, winnerSubject, winnerName)
 	}
+}
+
+func dispatchWinningVariant(db *sql.DB, rdb *redis.Client, campaignID, orgID, subject, variantName string) {
+	fromAddress := "campaigns@" + mailHostname()
+	var verifiedDomain string
+	if err := db.QueryRow("SELECT domain_name FROM domains WHERE org_id = $1 AND is_verified = true LIMIT 1", orgID).Scan(&verifiedDomain); err == nil {
+		fromAddress = "campaigns@" + verifiedDomain
+	}
+
+	rows, err := db.Query(`
+		SELECT c.email FROM contacts c
+		JOIN campaigns camp ON c.list_id = camp.list_id
+		WHERE camp.id = $1
+	`, campaignID)
+	if err != nil {
+		log.Printf("[AB Engine] Failed to load recipients for campaign %s: %v", campaignID, err)
+		return
+	}
+	defer rows.Close()
+
+	dispatched := 0
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			continue
+		}
+		req := SendEmailRequest{
+			MessageID: "abtest_" + campaignID + "_" + email,
+			OrgID:     orgID,
+			To:        email,
+			From:      fromAddress,
+			Subject:   subject,
+		}
+		reqJSON, _ := json.Marshal(req)
+		rdb.LPush(context.Background(), "email_outbound_queue", reqJSON)
+		dispatched++
+	}
+
+	db.Exec("UPDATE campaigns SET status = 'completed' WHERE id = $1", campaignID)
+	log.Printf("[AB Engine] -> Dispatched winning variant %s to %d recipients for Campaign %s", variantName, dispatched, campaignID)
 }

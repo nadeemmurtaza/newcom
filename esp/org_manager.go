@@ -1,20 +1,29 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Phase 37: Enterprise Organization System
 
+const impersonationTokenTTL = 1 * time.Hour
+
 type OrgManager struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *redis.Client
 }
 
-func NewOrgManager(db *sql.DB) *OrgManager {
-	return &OrgManager{db: db}
+func NewOrgManager(db *sql.DB, rdb *redis.Client) *OrgManager {
+	return &OrgManager{db: db, rdb: rdb}
 }
 
 // 1. SSO Enforcement Check
@@ -53,9 +62,18 @@ func (om *OrgManager) CanManageChildOrg(requesterSubAccountID string, targetOrgI
 }
 
 // 3. Support Impersonation
+//
+// Phase 55: two real bugs here. (a) sub_accounts was joined to a "roles"
+// table that never existed anywhere in schema.sql, so this errored on
+// every single call regardless of who called it or what role they had --
+// added the table in schema.sql. (b) the "token" was fmt.Sprintf'd plain
+// text with the admin ID, target org ID and expiry baked in -- anyone
+// could construct their own by copying the format, and worse, nothing
+// anywhere ever checked this token against anything, so impersonation
+// never actually granted access to begin with. It's now a real random
+// token stored server-side in Redis (authMiddleware in main.go consumes
+// it via VerifyImpersonationToken).
 func (om *OrgManager) GenerateImpersonationToken(adminSubAccountID string, targetOrgID string, ipAddress string) (string, error) {
-	// 1. Verify that the admin is actually a "Global System Admin" 
-	// For simulation, we check if their sub_account role is 'System Admin'
 	var role string
 	err := om.db.QueryRow(`
 		SELECT r.name FROM sub_accounts s
@@ -73,8 +91,32 @@ func (om *OrgManager) GenerateImpersonationToken(adminSubAccountID string, targe
 
 	log.Printf("SECURITY ALERT: System Admin %s initiated impersonation of Org %s from IP %s", adminSubAccountID, targetOrgID, ipAddress)
 
-	// 3. Mint the time-bound token (Simulated JWT)
-	token := fmt.Sprintf("jwt_impersonate_%s_%s_exp%d", adminSubAccountID, targetOrgID, time.Now().Add(1*time.Hour).Unix())
-	
+	// 3. Mint a real random token, keyed server-side -- not a string the
+	// caller could ever reconstruct themselves.
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("failed to generate impersonation token: %w", err)
+	}
+	token := hex.EncodeToString(raw)
+
+	value := adminSubAccountID + "|" + targetOrgID
+	if err := om.rdb.Set(context.Background(), "impersonation:"+token, value, impersonationTokenTTL).Err(); err != nil {
+		return "", fmt.Errorf("failed to store impersonation token: %w", err)
+	}
+
 	return token, nil
+}
+
+// VerifyImpersonationToken resolves a token minted above to the
+// (adminSubAccountID, targetOrgID) pair it grants, if it's still valid.
+func (om *OrgManager) VerifyImpersonationToken(token string) (adminSubAccountID, targetOrgID string, ok bool) {
+	val, err := om.rdb.Get(context.Background(), "impersonation:"+token).Result()
+	if err != nil || val == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(val, "|", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }

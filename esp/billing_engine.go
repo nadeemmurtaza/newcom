@@ -84,7 +84,9 @@ func (be *BillingEngine) CheckAndRecordUsage(ctx context.Context, orgID string) 
 	return true
 }
 
-// ProcessStripeWebhook processes simulated Stripe webhooks
+// ProcessStripeWebhook applies a verified Stripe webhook event (the caller,
+// handleStripeWebhook in main.go, has already checked the Stripe-Signature
+// header before this is called).
 func (be *BillingEngine) ProcessStripeWebhook(eventType, orgID, invoiceID string, amount int) {
 	log.Printf("[Billing] Received Stripe Webhook: %s for Org %s", eventType, orgID)
 
