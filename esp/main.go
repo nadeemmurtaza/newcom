@@ -268,8 +268,11 @@ func main() {
 	mux.HandleFunc("GET /api/domains", handleDashboardDomains)
 
 	// Phase 6: Mailbox API
-	mux.HandleFunc("GET /api/mailbox/messages", handleGetMessages)
-	mux.HandleFunc("PUT /api/mailbox/messages/", func(w http.ResponseWriter, r *http.Request) {
+	// Phase 52: every handler below now enforces that the session's mailbox
+	// owns the mailbox_id/message_id it's touching; see mailbox_auth.go.
+	mux.HandleFunc("POST /api/mailbox/login", handleMailboxLogin)
+	mux.HandleFunc("GET /api/mailbox/messages", mailboxAuthMiddleware(handleGetMessages))
+	mux.HandleFunc("PUT /api/mailbox/messages/", mailboxAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/star") {
 			handleToggleStar(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/move") {
@@ -287,9 +290,9 @@ func main() {
 		} else {
 			http.NotFound(w, r)
 		}
-	})
+	}))
 
-	mux.HandleFunc("DELETE /api/mailbox/messages/", handleDeleteMessage)
+	mux.HandleFunc("DELETE /api/mailbox/messages/", mailboxAuthMiddleware(handleDeleteMessage))
 
 	// Phase 7: Templates API
 	mux.HandleFunc("/api/templates", handleTemplates)

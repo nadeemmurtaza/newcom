@@ -153,6 +153,7 @@ CREATE TABLE mailboxes (
     -- Phase 39: Enterprise Mailboxes
     is_catch_all BOOLEAN DEFAULT FALSE,
     daily_send_limit INT DEFAULT 2000,
+    litigation_hold BOOLEAN DEFAULT FALSE, -- Phase 52: HandleMessageDeletion referenced this with no column
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -200,6 +201,7 @@ CREATE TABLE messages (
     phishing_flag BOOLEAN DEFAULT FALSE,
     is_read BOOLEAN DEFAULT FALSE,
     is_starred BOOLEAN DEFAULT FALSE,
+    is_pinned BOOLEAN DEFAULT FALSE, -- Phase 52: handlePinMessage referenced this with no column
     search_vector tsvector, -- LSM Search Index simulation
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
