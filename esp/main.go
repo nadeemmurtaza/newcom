@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -674,7 +675,26 @@ func handleApproveCampaign(w http.ResponseWriter, r *http.Request) {
 // speaking raw SMTP to this process. The raw-SMTP path is startInboundSMTPServer
 // in inbound_smtp.go; both share persistInboundMessage so delivery is
 // identical either way.
+//
+// Phase 61: had no verification at all -- anyone who knew (or enumerated)
+// a domain_id could POST and have arbitrary From/Subject/Body text appear
+// as a "delivered" message in any mailbox on that domain, indistinguishable
+// from real inbound mail (forged-sender phishing with no SMTP step at
+// all). Now requires a shared secret from the relay, the same pattern
+// handleStripeWebhook uses for its signature.
 func handleInboundEmail(w http.ResponseWriter, r *http.Request) {
+	inboundSecret := os.Getenv("INBOUND_WEBHOOK_SECRET")
+	if inboundSecret == "" {
+		log.Printf("Inbound webhook rejected: INBOUND_WEBHOOK_SECRET is not configured")
+		http.Error(w, "Inbound webhook not configured", http.StatusServiceUnavailable)
+		return
+	}
+	provided := r.Header.Get("X-Inbound-Secret")
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(inboundSecret)) != 1 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req struct {
 		DomainID string `json:"domain_id"`
 		To       string `json:"to"`

@@ -70,6 +70,10 @@ services:
       NID_CLIENT_SECRET: ${NID_CLIENT_SECRET:-}
       NID_REDIRECT_URI: ${NID_REDIRECT_URI:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      # Shared secret an external relay/MTA must present (X-Inbound-Secret)
+      # to use the HTTP inbound-mail path (POST /v1/inbound). Generate with:
+      # openssl rand -base64 24
+      INBOUND_WEBHOOK_SECRET: ${INBOUND_WEBHOOK_SECRET}
     ports:
       - "8080:8080" # HTTP API / dashboard
       - "2525:2525" # Inbound SMTP (front with a :25 relay or port-forward in prod)
