@@ -170,6 +170,16 @@ redisSub.subscribe('kill_switch_stream', (accountId) => {
 });
 
 wss.on('connection', async (ws, req) => {
+    // Phase 58: confirmed live -- auth (resolveUserSession,
+    // userCanAccessDocument) and getYDoc are real async DB calls, but this
+    // handler used to attach ws.on('message', ...) only after awaiting
+    // them. A client that sends its first update immediately on 'open'
+    // (exactly what a real editor does) raced the server: its message
+    // arrived and was silently dropped before any listener existed to
+    // receive it, because nothing buffers an unlistened 'message' event.
+    // ws.pause() stops the socket consuming data until resume() is
+    // called right after the listener is actually attached below.
+    ws.pause();
     try {
         const url = new URL(req.url, `http://${req.headers.host}`);
         const docId = url.searchParams.get('doc_id');
@@ -217,6 +227,7 @@ wss.on('connection', async (ws, req) => {
                 console.error('Yjs update error:', e);
             }
         });
+        ws.resume();
 
         // Store metadata on the socket for fast local routing and kill switch
         ws.docId = docId;
