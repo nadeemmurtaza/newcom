@@ -28,6 +28,65 @@ import (
 
 const userSessionTTL = 24 * time.Hour
 
+// handleUserSignup creates a new local-password identity and logs it in.
+//
+// Phase 62: handleUserLogin checked password_hash against a users row, but
+// nothing anywhere ever inserted one -- findOrCreateUserByNidAccount only
+// ever sets email+nid_account_id (nID-authenticated users have no local
+// password at all, per schema.sql's comment on password_hash). Password
+// login was unreachable for every person on the platform: there was no
+// way to become a user at all without either nID or a hand-run INSERT.
+// Open signup (anyone, like Gmail) was the chosen model for this
+// platform; nID remains the stronger, preferred identity -- this is the
+// fallback for someone who doesn't have one.
+// POST /api/users/signup  body: {"email": "...", "password": "..."}
+func handleUserSignup(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	if email == "" || len(req.Password) < 8 {
+		http.Error(w, "A valid email and a password of at least 8 characters are required", http.StatusBadRequest)
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Failed to secure password", http.StatusInternalServerError)
+		return
+	}
+
+	var userID string
+	err = db.QueryRow("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id", email, string(hash)).Scan(&userID)
+	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key") {
+			http.Error(w, "An account with that email already exists", http.StatusConflict)
+			return
+		}
+		http.Error(w, "Failed to create account", http.StatusInternalServerError)
+		return
+	}
+
+	token, err := issueUserSession(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "Failed to create session", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"token":      token,
+		"user_id":    userID,
+		"expires_in": int(userSessionTTL.Seconds()),
+	})
+}
+
 // handleUserLogin exchanges an email + password for a session token.
 // POST /api/users/login  body: {"email": "...", "password": "..."}
 func handleUserLogin(w http.ResponseWriter, r *http.Request) {

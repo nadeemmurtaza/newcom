@@ -45,17 +45,17 @@ var globalWorkerCtx context.Context
 var globalWorkerWg sync.WaitGroup
 
 type SendEmailRequest struct {
-	MessageID    string                 `json:"message_id,omitempty"`
-	SubAccountID string                 `json:"sub_account_id,omitempty"`
-	OrgID        string                 `json:"org_id,omitempty"`
-	To           string                 `json:"to"`
-	From         string                 `json:"from"`
-	Subject      string                 `json:"subject,omitempty"` // Now optional if using template
-	Body         string                 `json:"body,omitempty"`
-	CustomHeaders map[string]string     `json:"custom_headers,omitempty"`
-	TemplateID   string                 `json:"template_id,omitempty"`
-	TemplateData map[string]interface{} `json:"template_data,omitempty"`
-	SendAt       *int64                 `json:"send_at,omitempty"`
+	MessageID     string                 `json:"message_id,omitempty"`
+	SubAccountID  string                 `json:"sub_account_id,omitempty"`
+	OrgID         string                 `json:"org_id,omitempty"`
+	To            string                 `json:"to"`
+	From          string                 `json:"from"`
+	Subject       string                 `json:"subject,omitempty"` // Now optional if using template
+	Body          string                 `json:"body,omitempty"`
+	CustomHeaders map[string]string      `json:"custom_headers,omitempty"`
+	TemplateID    string                 `json:"template_id,omitempty"`
+	TemplateData  map[string]interface{} `json:"template_data,omitempty"`
+	SendAt        *int64                 `json:"send_at,omitempty"`
 }
 
 type SendEmailResponse struct {
@@ -131,7 +131,7 @@ func main() {
 	// See gmail_pipeline.go.
 	globalWorkerWg.Add(1)
 	go startSearchIndexerWorker(globalWorkerCtx, &globalWorkerWg, db, rdb, GlobalLSM)
-	
+
 	// Phase 38: Continuous DNS Verification Worker
 	globalWorkerWg.Add(1)
 	go startContinuousDNSWorker(globalWorkerCtx, &globalWorkerWg, db)
@@ -232,7 +232,7 @@ func main() {
 	// Phase 35: Campaign Maker-Checker Endpoints
 	mux.HandleFunc("POST /v1/campaigns/send", authMiddleware(handleSendCampaign))
 	mux.HandleFunc("POST /v1/campaigns/approve", authMiddleware(handleApproveCampaign))
-	
+
 	// Phase 39: Inbound Route
 	mux.HandleFunc("POST /v1/inbound", handleInboundEmail)
 
@@ -244,7 +244,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/mailboxes/{id}", authMiddleware(handleDeleteMailbox))
 
 	mux.HandleFunc("GET /health", handleHealthCheck)
-	
+
 	// Phase 3: Tracking & Bounces
 	mux.HandleFunc("GET /track/open/", handleTrackOpen)
 	mux.HandleFunc("GET /track/click/", handleTrackClick)
@@ -267,6 +267,7 @@ func main() {
 	// Phase 4: Dashboard API
 	// Phase 55: real session auth (user_auth.go) instead of trusting a
 	// client-supplied X-User-ID header for anything.
+	mux.HandleFunc("POST /api/users/signup", handleUserSignup)
 	mux.HandleFunc("POST /api/users/login", handleUserLogin)
 	// Phase 57: "Login with nID" -- the real identity layer; see nid_auth.go.
 	mux.HandleFunc("GET /api/users/login/nid/start", handleNidLoginStart)
@@ -277,6 +278,14 @@ func main() {
 	// One nID identity, every mailbox it's tied to -- personal plus every
 	// work mailbox assigned to it, across any org.
 	mux.HandleFunc("GET /api/me/mailboxes", userAuthMiddleware(handleMyMailboxes))
+	// Opens any of those listed mailboxes without its app password -- the
+	// nID/password session above already proves who this person is.
+	mux.HandleFunc("POST /api/me/mailboxes/{id}/session", userAuthMiddleware(handleCreateMailboxSession))
+	// Phase 62: self-service org + API key onboarding -- see org_signup.go.
+	mux.HandleFunc("POST /api/orgs", userAuthMiddleware(handleCreateOrg))
+	mux.HandleFunc("GET /api/me/orgs", userAuthMiddleware(handleMyOrgs))
+	mux.HandleFunc("POST /api/me/orgs/{orgId}/api-keys", userAuthMiddleware(handleCreateApiKey))
+	mux.HandleFunc("GET /api/me/orgs/{orgId}/api-keys", userAuthMiddleware(handleListApiKeys))
 	mux.HandleFunc("GET /api/stats", userAuthMiddleware(handleDashboardStats))
 	mux.HandleFunc("GET /api/domains", userAuthMiddleware(handleDashboardDomains))
 
@@ -285,9 +294,14 @@ func main() {
 	// owns the mailbox_id/message_id it's touching; see mailbox_auth.go.
 	mux.HandleFunc("POST /api/mailbox/login", handleMailboxLogin)
 	mux.HandleFunc("GET /api/mailbox/messages", mailboxAuthMiddleware(handleGetMessages))
+	// Phase 62: lets a logged-in mailbox actually send mail -- see
+	// mailbox_send.go for why this didn't exist before.
+	mux.HandleFunc("POST /api/mailbox/send", mailboxAuthMiddleware(handleMailboxSend))
 	mux.HandleFunc("PUT /api/mailbox/messages/", mailboxAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/star") {
 			handleToggleStar(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/read") {
+			handleMarkRead(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/move") {
 			handleMoveMessage(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/snooze") {
@@ -368,10 +382,10 @@ func main() {
 	}
 
 	addr := fmt.Sprintf(":%s", port)
-	
+
 	// Phase 41: Wrap the multiplexer in the BrandingMiddleware
 	handler := globalBrandingManager.BrandingMiddleware(mux)
-	
+
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: handler,
@@ -401,16 +415,16 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("HTTP Server Shutdown Error: %v", err)
 	}
-	
+
 	// Phase 23: Wait for all background workers to finish their current payload safely
 	log.Println("Stopping background workers...")
 	workerCancel()
 	globalWorkerWg.Wait()
-	
+
 	// Close resources
 	db.Close()
 	rdb.Close()
-	
+
 	log.Println("Zero-Loss Shutdown Complete. Exiting.")
 }
 
@@ -469,7 +483,7 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				JOIN organizations o ON s.org_id = o.id
 				WHERE a.key_hash = $1
 			`, apiKey).Scan(&subAccountID, &orgID, &region, &quota)
-			
+
 			if err != nil {
 				log.Printf("Auth failed for key: %v", err)
 				http.Error(w, "Unauthorized: Invalid API Key", http.StatusUnauthorized)
@@ -482,7 +496,7 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// Phase 36: Data Residency (Region) Check
 		// Assuming this server instance is running in US-EAST for simulation
 		if !tenantManager.EnsureRegion("US-EAST", region) {
-			http.Error(w, "451 Unavailable For Legal Reasons: Tenant data must reside in " + region, 451)
+			http.Error(w, "451 Unavailable For Legal Reasons: Tenant data must reside in "+region, 451)
 			return
 		}
 
@@ -528,7 +542,7 @@ func handleSendEmail(w http.ResponseWriter, r *http.Request) {
 
 	req.SubAccountID = r.Header.Get("X-SubAccount-ID")
 	req.OrgID = r.Header.Get("X-Org-ID")
-	
+
 	// Phase 39: Mailbox Velocity Limit
 	var mailboxID string
 	err := db.QueryRow("SELECT id FROM mailboxes WHERE email_address = $1", req.From).Scan(&mailboxID)
@@ -597,10 +611,10 @@ func handleSendCampaign(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	
+
 	subAccountID := r.Header.Get("X-SubAccount-ID")
 	orgID := r.Header.Get("X-Org-ID")
-	
+
 	recipientCount := 0
 	if rcpts, ok := req["Recipients"].([]interface{}); ok {
 		recipientCount = len(rcpts)
@@ -609,7 +623,7 @@ func handleSendCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqJSON, _ := json.Marshal(req)
-	
+
 	// Evaluate Maker-Checker Workflow
 	if globalRulesEngine.InterceptLargeCampaign(orgID, subAccountID, string(reqJSON), recipientCount) {
 		w.Header().Set("Content-Type", "application/json")
@@ -627,7 +641,7 @@ func handleSendCampaign(w http.ResponseWriter, r *http.Request) {
 		// If approved or small, log audit and proceed to queue
 		globalRulesEngine.LogAudit(orgID, subAccountID, "CAMPAIGN_QUEUED", r.RemoteAddr, string(reqJSON))
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte(`{"status": "QUEUED"}`))
@@ -637,7 +651,7 @@ func handleSendCampaign(w http.ResponseWriter, r *http.Request) {
 func handleApproveCampaign(w http.ResponseWriter, r *http.Request) {
 	subAccountID := r.Header.Get("X-SubAccount-ID")
 	orgID := r.Header.Get("X-Org-ID")
-	
+
 	// MFA Verification for sensitive action
 	if !globalRulesEngine.EvaluateMFA(subAccountID) {
 		http.Error(w, "MFA Required: You must enable MFA to approve campaigns.", http.StatusForbidden)
@@ -662,7 +676,7 @@ func handleApproveCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	globalRulesEngine.LogAudit(orgID, subAccountID, "CAMPAIGN_APPROVED", r.RemoteAddr, `{"campaign_id": "`+campaignID+`"}`)
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status": "APPROVED", "message": "Campaign released to dispatch queue."}`))

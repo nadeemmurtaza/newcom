@@ -1,0 +1,8 @@
+@import 'tailwindcss';
+@plugin 'daisyui';
+@import './tokens/tokens.css';
+@import './tokens/brand-theme.css';
+
+body {
+  background-color: var(--color-base-200);
+}

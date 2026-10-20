@@ -88,6 +88,49 @@ func handleMailboxLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCreateMailboxSession lets an already-authenticated person (nID or
+// legacy password session, userAuthMiddleware) open any mailbox they own --
+// personal or work, no matter which org assigned it -- without knowing its
+// app password.
+//
+// Before this, GET /api/me/mailboxes could list every mailbox someone owns,
+// but actually reading one still required handleMailboxLogin's
+// email+app_password flow, and an assignee was never given that app
+// password (it's only shown once, to whoever created the mailbox). That
+// broke the "one login surfaces all your mail" requirement this identity
+// model exists for: nID already proved who this person is, which is a
+// stronger proof than the app password it would otherwise demand.
+// POST /api/me/mailboxes/{id}/session
+func handleCreateMailboxSession(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-User-ID") // set by userAuthMiddleware from a verified session
+	mailboxID := r.PathValue("id")
+
+	var owns bool
+	if err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM mailboxes WHERE id = $1 AND owner_user_id = $2)", mailboxID, userID).Scan(&owns); err != nil || !owns {
+		http.Error(w, "Forbidden: you do not own this mailbox", http.StatusForbidden)
+		return
+	}
+
+	rawToken := make([]byte, 32)
+	if _, err := rand.Read(rawToken); err != nil {
+		http.Error(w, "Failed to create session", http.StatusInternalServerError)
+		return
+	}
+	token := hex.EncodeToString(rawToken)
+
+	if err := rdb.Set(r.Context(), "mailbox_session:"+token, mailboxID, mailboxSessionTTL).Err(); err != nil {
+		http.Error(w, "Failed to create session", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"token":      token,
+		"mailbox_id": mailboxID,
+		"expires_in": int(mailboxSessionTTL.Seconds()),
+	})
+}
+
 type mailboxSessionContextKey struct{}
 
 // mailboxAuthMiddleware resolves "Authorization: Bearer <token>" to a

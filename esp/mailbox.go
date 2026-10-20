@@ -8,17 +8,17 @@ import (
 )
 
 type MailboxMessage struct {
-	ID           string   `json:"id"`
-	Sender       string   `json:"sender"`
-	Subject      string   `json:"subject"`
-	BodyText     string   `json:"body_text"`
-	BodyHTML     string   `json:"body_html"`
-	IsRead       bool     `json:"is_read"`
-	IsStarred    bool     `json:"is_starred"`
-	CreatedAt    string   `json:"created_at"`
-	ThreadID     string   `json:"thread_id,omitempty"`
-	Category     string   `json:"category,omitempty"`
-	SnoozedUntil string   `json:"snoozed_until,omitempty"`
+	ID           string `json:"id"`
+	Sender       string `json:"sender"`
+	Subject      string `json:"subject"`
+	BodyText     string `json:"body_text"`
+	BodyHTML     string `json:"body_html"`
+	IsRead       bool   `json:"is_read"`
+	IsStarred    bool   `json:"is_starred"`
+	CreatedAt    string `json:"created_at"`
+	ThreadID     string `json:"thread_id,omitempty"`
+	Category     string `json:"category,omitempty"`
+	SnoozedUntil string `json:"snoozed_until,omitempty"`
 }
 
 func handleGetMessages(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +113,43 @@ func handleToggleStar(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleMarkRead sets a message's is_read flag.
+//
+// Phase 62: nothing anywhere ever set is_read to true -- every message
+// stayed "unread" forever no matter how many times it was opened, since
+// handleGetMessages only reads the column, never writes it.
+// PUT /api/mailbox/messages/{id}/read?read=true|false
+func handleMarkRead(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) < 5 {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	messageID := parts[4] // /api/mailbox/messages/{id}/read
+	read := r.URL.Query().Get("read") != "false"
+
+	mailboxID, err := mailboxOfMessage(r, messageID)
+	if err != nil {
+		http.Error(w, "Message not found", http.StatusNotFound)
+		return
+	}
+	if !requireMailboxOwnership(w, r, mailboxID) {
+		return
+	}
+
+	err = withOrgTx(r, func(tx *sql.Tx) error {
+		_, err := tx.Exec("UPDATE messages SET is_read = $1 WHERE id = $2", read, messageID)
+		return err
+	})
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(http.StatusOK)
+}
+
 func handleMoveMessage(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 5 {
@@ -121,7 +158,7 @@ func handleMoveMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	messageID := parts[4] // /api/mailbox/messages/{id}/move
 	folderName := r.URL.Query().Get("folder")
-	
+
 	if folderName == "" {
 		http.Error(w, "Missing folder parameter", http.StatusBadRequest)
 		return

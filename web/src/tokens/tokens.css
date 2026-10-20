@@ -1,0 +1,20 @@
+/* Non-colour tokens: seven layout tiers, type, motion. Colours/radii live in brand-theme.css. */
+@theme {
+  --breakpoint-*: initial;
+  --breakpoint-xs: 17.5rem;   /* 280  fold cover screens */
+  --breakpoint-sm: 23.75rem;  /* 380  phones */
+  --breakpoint-fold: 40rem;   /* 640  unfolded / large phones */
+  --breakpoint-md: 48rem;     /* 768  tablets */
+  --breakpoint-lg: 64rem;     /* 1024 laptops */
+  --breakpoint-xl: 80rem;     /* 1280 desktop */
+  --breakpoint-2xl: 96rem;    /* 1536 wide desktop */
+
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
+  --font-display: ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, monospace;
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 360ms;
+}
