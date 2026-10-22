@@ -1,6 +1,8 @@
 # NEWAX Ecosystem
 
-This repo is one of nine that make up one connected NEWAX ecosystem. This
+> **Status:** draft · **Last updated:** 2026-10-22 · **Owner:** NEWAX Engineering
+
+This repo is one of seven that make up one connected NEWAX ecosystem. This
 file exists so anyone working in any one of them knows what the others are,
 what belongs here vs. there, and the rules that keep them decoupled. It is
 copied verbatim into every repo listed below — if you're editing it, edit it
@@ -10,6 +12,18 @@ Full audit and roadmap this file is built from:
 `core-newax/docs/ecosystem/MODULE-AUDIT-AND-ROADMAP.md` (see that doc for the
 evidence behind every claim here, and the phased plan to get from today's
 state to this target state).
+
+## Repos
+
+| Repo | GitHub |
+|---|---|
+| nID | https://github.com/nadeemmurtaza/nID |
+| core-newax | https://github.com/nadeemmurtaza/core-newax |
+| erp-1 (Yaseen) | https://github.com/nadeemmurtaza/erp-1 |
+| newcom | https://github.com/nadeemmurtaza/newcom |
+| Communicator | https://github.com/nadeemmurtaza/Communicator |
+| harvester | https://github.com/Newax-Technologies/harvester |
+| AegisDesk | https://github.com/nadeemmurtaza/AegisDesk |
 
 ## The one rule
 
