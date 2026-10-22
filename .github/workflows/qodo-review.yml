@@ -13,7 +13,22 @@ permissions:
 
 jobs:
   qodo_review:
-    if: ${{ github.event.sender.type != 'Bot' }}
+    # Only run on pull requests, or on comments if the comment is explicitly on a pull request
+    # and authored by a repository owner, member, or collaborator (prevents unauthorized secret-bearing executions).
+    if: >
+      github.event.sender.type != 'Bot' &&
+      (
+        github.event_name == 'pull_request' ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request != null &&
+          (
+            github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR'
+          )
+        )
+      )
     runs-on: ubuntu-latest
     name: Qodo Code Review
     steps:
@@ -21,7 +36,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Qodo PR Agent
-        uses: the-pr-agent/pr-agent@main
+        uses: the-pr-agent/pr-agent@e2456c079a50d31f1d9e754c78c266daa4b2266d
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
