@@ -1,0 +1,90 @@
+# Qodo (PR-Agent) Open Source Configuration for newcom (Go ESP Relay)
+# Reference: https://docs.qodo.ai/configuration
+
+[config]
+model = "gpt-4o"
+fallback_models = ["gpt-4o-mini"]
+git_provider = "github"
+publish_output = true
+auto_review = true
+ignore_pr_title = ["^\\[wip\\]", "^draft:"]
+ignore_pr_labels = ["skip-review", "automated-pr"]
+ignore_bot_pr = true
+
+[github_app]
+pr_commands = [
+    "/agentic_describe",
+    "/agentic_review"
+]
+handle_push_trigger = true
+push_commands = [
+    "/agentic_review"
+]
+feedback_on_draft_pr = false
+
+[review_agent]
+comments_location_policy = "both"
+inline_comments_severity_threshold = 2
+comments_routing_preset = "both"
+
+enable_incremental_review = true
+persistent_comment_notification = true
+publish_in_progress_comment = true
+
+enable_commitable_suggestions = true
+enable_review_md = true
+override_effort = "standard"
+
+issues_user_guidelines = """
+1. Go Concurrency & Memory Safety: Ensure goroutines, channels, and sync primitives (sync.Mutex, sync.RWMutex) are free from race conditions, deadlocks, and memory leaks.
+2. Cryptographic Isolation: Validate dual-key isolation (K_sender != K_receiver) via CryptoMesh cipher before transmitting outbound dispatches.
+3. Multi-Tenant Scoping: Verify that all dispatch queues, email templates, and event payloads carry explicit tenant_id.
+4. Clean Error Propagation: Return structured Go errors and avoid panics in production handlers.
+"""
+
+compliance_user_guidelines = """
+1. Zero tolerance for PHP: Ensure 0.0% PHP in the codebase.
+2. Ecosystem Architecture: Adhere to asynchronous event bus ingestion and HTTP ingress mesh rules.
+3. Secret Protection: Never log SMTP passwords, API keys, or private RSA keys in plaintext.
+"""
+
+[review_agent_ux]
+finding_overflow_count = 3
+use_images_and_animations = true
+show_context_used = true
+show_persistent_review_section = true
+show_daily_tips = false
+show_dividers = true
+show_comment_footer = true
+severity_terminology = "high_medium_low"
+findings_label_coloring = "simplified"
+show_resolved_findings = true
+resolved_findings_placement = "in_place"
+
+expand_description = true
+expand_code = true
+expand_recommendation = true
+expand_evidence = false
+
+[qodo_describe_agent]
+publish_mode = "dynamic"
+publish_review_time_estimate_labels = true
+
+[pr_code_suggestions]
+num_code_suggestions = 4
+rank_suggestions = true
+enable_chat_in_code_suggestions = true
+
+[chat_agent]
+enabled = true
+enable_fixer_agent = true
+
+[fixer_agent]
+enable = true
+enable_auto_fix = false
+action_level_threshold = 2
+open_new_pr = false
+
+[checks]
+enable_auto_checks_feedback = true
+persistent_comment = true
