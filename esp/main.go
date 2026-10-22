@@ -168,6 +168,9 @@ func main() {
 	// Phase 31: Initialize Rules Engine & Context-Aware Access
 	globalRulesEngine = NewRulesEngine(db, riskEngine)
 
+	// Banking-Grade Zero-Trust Crypto Mesh (ECOSYSTEM.md)
+	initCryptoMesh()
+
 	mux := http.NewServeMux()
 
 	// Serve the frontend dashboard
@@ -244,6 +247,9 @@ func main() {
 	mux.HandleFunc("DELETE /api/mailboxes/{id}", authMiddleware(handleDeleteMailbox))
 
 	mux.HandleFunc("GET /health", handleHealthCheck)
+
+	// NEWAX Crypto Mesh Ingress (Zero-Trust Dual-Key Re-Encryption from NeuraCore)
+	mux.HandleFunc("POST /api/v1/crypto-mesh/ingress", handleCryptoMeshIngress)
 
 	// Phase 3: Tracking & Bounces
 	mux.HandleFunc("GET /track/open/", handleTrackOpen)
